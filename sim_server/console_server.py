@@ -12,7 +12,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from agents import CallTakerAgent, CallerAgent, QAEvaluatorAgent
+from agents import (
+    CallTakerAgent,
+    CallerAgent,
+    QAEvaluatorAgent,
+    create_calltaker_agent,
+    create_caller_agent,
+    create_qa_agent,
+    is_manual,
+    is_replay,
+    list_profiles,
+)
 from sim_server import SimulationEngine
 from sim_server.errors import SimError
 from sim_server.schema_utils import load_json
@@ -28,9 +38,9 @@ class ConsoleState:
     caller_seed: dict[str, Any] | None = None
     incident_seed: dict[str, Any] | None = None
     qa_seed: dict[str, Any] | None = None
-    caller_agent_mode: str = "manual"
-    calltaker_agent_mode: str = "manual"
-    qa_agent_mode: str = "deterministic_v1"
+    caller_agent_id: str = "manual"
+    calltaker_agent_id: str = "manual"
+    qa_agent_id: str = "deterministic_v1"
     caller_agent: CallerAgent | None = None
     calltaker_agent: CallTakerAgent | None = None
     qa_agent: QAEvaluatorAgent | None = None
@@ -76,6 +86,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _handle_api_get(self, path: str, query: dict[str, list[str]]) -> None:
         if path == "/api/health":
             self._send_json({"status": "ok"})
+            return
+        if path == "/api/agent/catalog":
+            self._send_json({"profiles": list_profiles()})
             return
         if path == "/api/state":
             self._send_json(self._state_payload())
@@ -162,9 +175,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         incident_fixture = str(payload.get("incident_fixture", "fixtures/incident_fire_residential.json"))
         qa_fixture = str(payload.get("qa_fixture", "fixtures/qaTemplate_003.json"))
         max_turns = int(payload.get("max_turns", 20))
-        caller_agent_mode = str(payload.get("caller_agent_mode", "manual"))
-        calltaker_agent_mode = str(payload.get("calltaker_agent_mode", "manual"))
-        qa_agent_mode = str(payload.get("qa_agent_mode", "deterministic_v1"))
+        caller_agent_id = str(payload.get("caller_agent_id", payload.get("caller_agent_mode", "manual")))
+        calltaker_agent_id = str(payload.get("calltaker_agent_id", payload.get("calltaker_agent_mode", "manual")))
+        qa_agent_id = str(payload.get("qa_agent_id", payload.get("qa_agent_mode", "deterministic_v1")))
 
         caller = load_json(root / caller_fixture)
         incident = load_json(root / incident_fixture)
@@ -186,14 +199,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.app.caller_seed = caller
         self.app.incident_seed = incident
         self.app.qa_seed = qa
-        self.app.caller_agent_mode = caller_agent_mode
-        self.app.calltaker_agent_mode = calltaker_agent_mode
-        self.app.qa_agent_mode = qa_agent_mode
-        self.app.caller_agent = CallerAgent(caller_json=caller, incident_json=incident) if caller_agent_mode == "deterministic_v1" else None
-        self.app.calltaker_agent = (
-            CallTakerAgent(incident_json=incident, dispatch_enabled=True) if calltaker_agent_mode == "deterministic_v1" else None
-        )
-        self.app.qa_agent = QAEvaluatorAgent(qa_template_json=qa) if qa_agent_mode in {"deterministic_v1", "replay"} else None
+        self.app.caller_agent_id = caller_agent_id
+        self.app.calltaker_agent_id = calltaker_agent_id
+        self.app.qa_agent_id = qa_agent_id
+        self.app.caller_agent = create_caller_agent(caller_agent_id, caller_json=caller, incident_json=incident)
+        self.app.calltaker_agent = create_calltaker_agent(calltaker_agent_id, incident_json=incident, dispatch_enabled=True)
+        self.app.qa_agent = create_qa_agent(qa_agent_id, qa_template_json=qa)
         self.app.replay_steps = self._load_replay_for_console(scenario_id, incident)
         self.app.replay_idx = 0
         self.app.last_qa_score = None
@@ -235,10 +246,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "scenario_id": self.app.scenario_id,
             "incident_id": incident_id,
             "phase": snapshot.get("episode_phase"),
-            "agent_modes": {
-                "caller": self.app.caller_agent_mode,
-                "calltaker": self.app.calltaker_agent_mode,
-                "qa": self.app.qa_agent_mode,
+            "agent_profiles": {
+                "caller": self.app.caller_agent_id,
+                "calltaker": self.app.calltaker_agent_id,
+                "qa": self.app.qa_agent_id,
             },
             "cad_state": snapshot.get("cad_state"),
             "record_version": snapshot.get("record_version"),
@@ -271,7 +282,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             events = self.app.engine.episode_events(incident_id)
             system_events = [ev for ev in events[-30:] if ev.get("event_type") == "system"]
 
-            if self.app.caller_agent_mode == "replay" or self.app.calltaker_agent_mode == "replay":
+            if is_replay("caller", self.app.caller_agent_id) or is_replay("calltaker", self.app.calltaker_agent_id):
                 if not self.app.replay_steps or self.app.replay_idx >= len(self.app.replay_steps):
                     break
                 step = self.app.replay_steps[self.app.replay_idx]
@@ -284,7 +295,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 end_reason = str(step.get("end_reason", "other"))
             else:
                 if not self.app.caller_agent or not self.app.calltaker_agent:
-                    raise SimError("agent_mode_invalid", "auto_step requires deterministic or replay agents")
+                    raise SimError("agent_mode_invalid", "auto_step requires callable or replay agents")
                 last_ct = self._latest_calltaker_text(incident_id)
                 caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
                 decision = self.app.calltaker_agent.next_turn(
@@ -309,8 +320,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _api_qa_evaluate(self) -> dict[str, Any]:
         incident_id = self._incident_or_400()
-        if self.app.qa_agent_mode == "manual" or self.app.qa_agent is None:
-            raise SimError("qa_mode_invalid", "qa agent mode is manual; cannot evaluate")
+        if is_manual("qa", self.app.qa_agent_id) or self.app.qa_agent is None:
+            raise SimError("qa_mode_invalid", "qa agent profile is manual; cannot evaluate")
 
         events = self.app.engine.episode_events(incident_id)
         incident_type = str((self.app.incident_seed or {}).get("type", "Unknown"))

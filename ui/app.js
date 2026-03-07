@@ -17,6 +17,7 @@ const api = {
 };
 
 let state = { loaded: false };
+let agentCatalog = [];
 
 function $(id) {
   return document.getElementById(id);
@@ -131,7 +132,7 @@ function render(data) {
     escalation_depth: data.metrics?.escalation_queue_depth || 0,
     avg_checkpoint_latency_ms: data.metrics?.avg_checkpoint_latency_ms || 0,
     event_count: data.metrics?.event_count || 0,
-    agent_modes: data.agent_modes || {},
+    agent_profiles: data.agent_profiles || {},
   });
   $("locationView").textContent = pretty(data.location_panel || {});
   $("cadView").textContent = pretty({
@@ -163,9 +164,9 @@ async function setupEpisode() {
       caller_fixture: $("callerFixture").value,
       incident_fixture: $("incidentFixture").value,
       qa_fixture: $("qaFixture").value,
-      caller_agent_mode: $("callerAgentMode").value,
-      calltaker_agent_mode: $("calltakerAgentMode").value,
-      qa_agent_mode: $("qaAgentMode").value,
+      caller_agent_id: $("callerAgentId").value,
+      calltaker_agent_id: $("calltakerAgentId").value,
+      qa_agent_id: $("qaAgentId").value,
       max_turns: Number($("maxTurns").value || 20),
     };
     const out = await api.post("/api/admin/load_start", body);
@@ -173,6 +174,32 @@ async function setupEpisode() {
     await refresh();
   } catch (err) {
     $("setupStatus").textContent = err.message;
+  }
+}
+
+function renderAgentSelect(selectId, role, selectedId) {
+  const select = $(selectId);
+  if (!select) return;
+  const options = agentCatalog.filter((p) => p.role === role);
+  select.innerHTML = "";
+  options.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = `${p.id} (${p.provider})`;
+    if (p.id === selectedId) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
+async function loadAgentCatalog() {
+  try {
+    const out = await api.get("/api/agent/catalog");
+    agentCatalog = out.profiles || [];
+    renderAgentSelect("callerAgentId", "caller", "deterministic_v1");
+    renderAgentSelect("calltakerAgentId", "calltaker", "deterministic_v1");
+    renderAgentSelect("qaAgentId", "qa", "deterministic_v1");
+  } catch (err) {
+    $("setupStatus").textContent = `Catalog load failed: ${err.message}`;
   }
 }
 
@@ -284,5 +311,5 @@ function bind() {
 }
 
 bind();
-refresh();
+loadAgentCatalog().then(refresh);
 setInterval(refresh, 1200);

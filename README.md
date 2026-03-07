@@ -50,3 +50,15 @@ Open:
 ```text
 http://127.0.0.1:8101
 ```
+
+Episode setup includes selectable agent profiles for `caller`, `calltaker`, and `qa`.
+The backend exposes `GET /api/agent/catalog`, and `POST /api/admin/load_start` accepts:
+- `caller_agent_id`
+- `calltaker_agent_id`
+- `qa_agent_id`
+
+Supported profile IDs include:
+- `manual`
+- `deterministic_v1`
+- `replay`
+- `openai_gpt4o_mini_v1` (requires `OPENAI_API_KEY` and `openai` package)
