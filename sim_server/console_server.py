@@ -128,6 +128,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             cad_updates = payload.get("cad_updates", {})
             if not isinstance(cad_updates, dict):
                 cad_updates = {}
+            self._prime_caller_for_manual_calltaker(incident_id)
             out = self.app.engine.calltaker_post_turn(
                 incident_id=incident_id,
                 text=str(payload.get("text", "")),
@@ -381,6 +382,30 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not turns:
             return ""
         return str(turns[-1].get("caller", ""))
+
+    def _prime_caller_for_manual_calltaker(self, incident_id: str) -> None:
+        if not is_manual("calltaker", self.app.calltaker_agent_id):
+            return
+        if is_manual("caller", self.app.caller_agent_id):
+            return
+        ep = self.app.engine._get_episode(incident_id)  # type: ignore[attr-defined]
+        if str(getattr(ep, "pending_caller_text", "") or "").strip():
+            return
+        events = self.app.engine.episode_events(incident_id)
+        system_events = [ev for ev in events[-30:] if ev.get("event_type") == "system"]
+        if is_replay("caller", self.app.caller_agent_id):
+            if not self.app.replay_steps or self.app.replay_idx >= len(self.app.replay_steps):
+                return
+            step = self.app.replay_steps[self.app.replay_idx]
+            self.app.replay_idx += 1
+            caller_text = str(step.get("caller_text", ""))
+            caller_meta = step.get("caller_metadata") if isinstance(step.get("caller_metadata"), dict) else None
+        else:
+            if not self.app.caller_agent:
+                return
+            last_ct = self._latest_calltaker_text(incident_id)
+            caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
+        self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
 
     def _load_replay_for_console(self, scenario_id: str, incident_seed: dict[str, Any]) -> list[dict[str, Any]] | None:
         candidates: list[Path] = []

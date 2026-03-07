@@ -47,13 +47,17 @@ function renderTranscript(data) {
     ct.innerHTML = `<div class="meta">Turn ${row.turn} · Call-Taker</div><div>${escapeHtml(row.call_taker || "")}</div>`;
     list.appendChild(ct);
 
-    const caller = document.createElement("div");
-    caller.className = "bubble caller";
-    caller.innerHTML = `<div class="meta">Turn ${row.turn} · Caller</div><div>${escapeHtml(row.caller || "")}</div>`;
-    if (mode === "detailed" && row.caller_metadata) {
-      caller.innerHTML += `<div class="meta">metadata: ${escapeHtml(JSON.stringify(row.caller_metadata))}</div>`;
+    const callerText = String(row.caller || "");
+    const hasCaller = callerText.trim().length > 0 || Boolean(row.caller_metadata);
+    if (hasCaller) {
+      const caller = document.createElement("div");
+      caller.className = "bubble caller";
+      caller.innerHTML = `<div class="meta">Turn ${row.turn} · Caller</div><div>${escapeHtml(callerText)}</div>`;
+      if (mode === "detailed" && row.caller_metadata) {
+        caller.innerHTML += `<div class="meta">metadata: ${escapeHtml(JSON.stringify(row.caller_metadata))}</div>`;
+      }
+      list.appendChild(caller);
     }
-    list.appendChild(caller);
   });
 
   const pendingCaller = String(data.pending_caller_text || "");
@@ -61,9 +65,6 @@ function renderTranscript(data) {
     const pending = document.createElement("div");
     pending.className = "bubble caller";
     pending.innerHTML = `<div class="meta">Turn ${Number(data.pending_turn || 0)} · Caller (queued)</div><div>${escapeHtml(pendingCaller)}</div>`;
-    if (mode === "detailed" && data.pending_caller_metadata) {
-      pending.innerHTML += `<div class="meta">metadata: ${escapeHtml(JSON.stringify(data.pending_caller_metadata))}</div>`;
-    }
     list.appendChild(pending);
   }
 }
