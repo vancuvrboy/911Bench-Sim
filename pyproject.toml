@@ -1,0 +1,8 @@
+[project]
+name = "911bench-sim"
+version = "0.1.0"
+description = "911Bench standalone SIM server"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+include = ["sim_server*", "tests*"]
