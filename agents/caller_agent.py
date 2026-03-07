@@ -80,6 +80,10 @@ class CallerAgent:
         if not emitted:
             emitted.append("I understand. I am staying on the line.")
 
+        disfluencies = ((self.caller.get("speech", {}) or {}).get("disfluencies") or [])
+        if disfluencies and self.state.turn % 2 == 0:
+            emitted.insert(0, str(disfluencies[0]))
+
         text = " ".join(emitted)
         return text, self._metadata(progression_note=progression_note)
 

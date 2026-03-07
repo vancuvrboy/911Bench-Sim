@@ -459,6 +459,11 @@ class SimulationEngine:
             raise ValidationError("artifact_not_found", f"unknown artifact: {name}")
         return {"name": name, "content": ep.sealed_artifacts[name]}
 
+    def episode_events(self, incident_id: str) -> list[dict[str, Any]]:
+        """Expose a copy of in-memory events for local harness orchestration."""
+        ep = self._get_episode(incident_id)
+        return json.loads(json.dumps(ep.events))
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

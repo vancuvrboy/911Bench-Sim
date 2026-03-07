@@ -19,3 +19,9 @@ Phase 1 SIM+agents characterization:
 ```bash
 python3 -m harness.sim_episode_runner --root . --output-dir tests/reports --mode live
 ```
+
+Phase 1 SIM-AGT validation suite:
+
+```bash
+python3 -m tests.harness.phase1_validation --root . --output-dir tests/reports
+```

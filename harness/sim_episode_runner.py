@@ -44,7 +44,16 @@ class SimEpisodeRunner:
         self.mode = mode
         self.replay_dir = replay_dir
 
-    def run_episode(self, scenario_name: str, caller_file: str, incident_file: str, qa_file: str, max_turns: int = 20) -> dict[str, Any]:
+    def run_episode(
+        self,
+        scenario_name: str,
+        caller_file: str,
+        incident_file: str,
+        qa_file: str,
+        max_turns: int = 20,
+        calltaker_config: dict[str, Any] | None = None,
+        qa_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         caller = load_json(self.root / caller_file)
         incident = load_json(self.root / incident_file)
         incident = json.loads(json.dumps(incident))
@@ -63,10 +72,10 @@ class SimEpisodeRunner:
         engine.episode_start(incident_id)
 
         caller_agent = CallerAgent(caller_json=caller, incident_json=incident)
-        calltaker_agent = CallTakerAgent(incident_json=incident)
-        qa_agent = QAEvaluatorAgent(qa_template_json=qa_template)
+        calltaker_agent = CallTakerAgent(incident_json=incident, **(calltaker_config or {}))
+        qa_agent = QAEvaluatorAgent(qa_template_json=qa_template, **(qa_config or {}))
 
-        transcript_cursor = 0
+        event_cursor = 0
         replay_steps = self._load_replay_steps(scenario_name)
         recorded_steps: list[dict[str, Any]] = []
 
@@ -75,7 +84,7 @@ class SimEpisodeRunner:
             if snapshot["episode_phase"] == "sealed":
                 break
 
-            system_events = self._system_events_since(engine, incident_id, transcript_cursor)
+            system_events, event_cursor = self._system_events_since(engine, incident_id, event_cursor)
             ct_last = self._latest_calltaker_text(engine, incident_id)
 
             if replay_steps is not None:
@@ -97,6 +106,16 @@ class SimEpisodeRunner:
                 cad_updates = decision.cad_updates
                 end_call = decision.end_call
                 end_reason = decision.end_reason
+                if decision.parse_error:
+                    engine.plant_emit_event(
+                        {
+                            "event_type": "system",
+                            "incident_id": incident_id,
+                            "subtype": "parse_error",
+                            "turn": int(snapshot.get("record_version", 0)),
+                            "text": "calltaker_parse_fallback",
+                        }
+                    )
 
             engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
             engine.calltaker_post_turn(incident_id=incident_id, text=ct_text, cad_updates=cad_updates)
@@ -111,8 +130,6 @@ class SimEpisodeRunner:
                     "end_reason": end_reason,
                 }
             )
-
-            transcript_cursor = max(transcript_cursor, engine.plant_get_transcript_since(incident_id, transcript_cursor)["new_cursor"])
 
             if end_call:
                 engine.calltaker_end_call(incident_id=incident_id, reason=end_reason or "other")
@@ -166,6 +183,7 @@ class SimEpisodeRunner:
             "normalized_events_hash": hashlib.sha256(
                 json.dumps(_normalize_events_for_replay(events), sort_keys=True).encode("utf-8")
             ).hexdigest(),
+            "events": events,
         }
 
     def _run_dir(self) -> Path:
@@ -193,12 +211,17 @@ class SimEpisodeRunner:
             return ""
         return str(transcript[-1].get("call_taker", ""))
 
-    def _system_events_since(self, engine: SimulationEngine, incident_id: str, _cursor: int) -> list[dict[str, Any]]:
-        blob = engine.artifact_get(incident_id, "transcript.json") if engine.plant_get_state_snapshot(incident_id)["episode_phase"] == "sealed" else None
-        _ = blob  # keep interface for future SSE/pull parity
-        # Lightweight system-event access by reading in-memory stream through state snapshot side effects.
-        # For now this runner derives system awareness from event artifact at loop edges.
-        return []
+    def _system_events_since(
+        self,
+        engine: SimulationEngine,
+        incident_id: str,
+        cursor: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        events = engine.episode_events(incident_id)
+        new_events = [ev for ev in events if int(ev.get("event_seq", -1)) > cursor]
+        system_events = [ev for ev in new_events if ev.get("event_type") == "system"]
+        new_cursor = max([cursor] + [int(ev.get("event_seq", cursor)) for ev in new_events])
+        return system_events, new_cursor
 
 
 def _dispatch_turn(events: list[dict[str, Any]]) -> int | None:
