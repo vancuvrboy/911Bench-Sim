@@ -88,6 +88,7 @@ class Harness:
         scenario = case.get("scenario", {})
         incident_id = ""
         latest_request_id = ""
+        last_response: dict[str, Any] | None = None
 
         for step in case.get("script", []):
             action = step.get("action")
@@ -103,14 +104,15 @@ class Harness:
                     qa_template_json=qa_json,
                 )
                 incident_id = response["incident_id"]
+                last_response = response
             elif action == "start_episode":
-                engine.episode_start(incident_id)
+                last_response = engine.episode_start(incident_id)
             elif action == "caller_turn":
-                role.caller_turn(incident_id=incident_id, text=step["text"], metadata=step.get("metadata"))
+                last_response = role.caller_turn(incident_id=incident_id, text=step["text"], metadata=step.get("metadata"))
             elif action == "calltaker_turn":
-                role.calltaker_turn(incident_id=incident_id, text=step["text"], cad_updates=step.get("cad_updates"))
+                last_response = role.calltaker_turn(incident_id=incident_id, text=step["text"], cad_updates=step.get("cad_updates"))
             elif action == "governance_patch":
-                gov.apply_cad_patch(
+                last_response = gov.apply_cad_patch(
                     incident_id=incident_id,
                     action_id=step.get("action_id", "action-1"),
                     action_class=step.get("action_class", "cad_update.address"),
@@ -122,8 +124,9 @@ class Harness:
             elif action == "checkpoint_request":
                 req = gov.request_checkpoint(incident_id=incident_id, request=step["request"])
                 latest_request_id = req["request_id"]
+                last_response = req
             elif action == "checkpoint_submit":
-                engine.checkpoint_submit(
+                last_response = engine.checkpoint_submit(
                     request_id=step.get("request_id", latest_request_id),
                     decision=step["decision"],
                     edited_payload=step.get("edited_payload"),
@@ -131,15 +134,33 @@ class Harness:
                     rationale=step.get("rationale"),
                 )
             elif action == "checkpoint_poll":
-                engine.checkpoint_poll(step.get("request_id", latest_request_id))
+                last_response = engine.checkpoint_poll(step.get("request_id", latest_request_id))
+            elif action == "checkpoint_list":
+                last_response = engine.checkpoint_list(
+                    incident_id=incident_id,
+                    status_filter=step.get("status_filter", "pending"),
+                    role_filter=step.get("role_filter"),
+                )
             elif action == "emit_event":
                 payload = dict(step["event"])
                 payload.setdefault("incident_id", incident_id)
-                gov.emit_event(payload)
+                last_response = gov.emit_event(payload)
             elif action == "end_call":
-                role.end_call(incident_id=incident_id, reason=step["reason"], reason_detail=step.get("reason_detail"))
+                last_response = role.end_call(incident_id=incident_id, reason=step["reason"], reason_detail=step.get("reason_detail"))
             elif action == "end_episode":
-                engine.episode_end(incident_id=incident_id, reason=step.get("reason", "test_complete"))
+                last_response = engine.episode_end(incident_id=incident_id, reason=step.get("reason", "test_complete"))
+            elif action == "artifact_get":
+                last_response = engine.artifact_get(incident_id=incident_id, name=step.get("name", "_events.ndjson"))
+            elif action == "state_snapshot":
+                last_response = engine.plant_get_state_snapshot(incident_id)
+            elif action == "transcript_since":
+                last_response = engine.plant_get_transcript_since(incident_id=incident_id, cursor=int(step.get("cursor", 0)))
+            elif action == "sleep_ms":
+                time.sleep(max(0, int(step.get("ms", 0))) / 1000.0)
+            elif action == "set_request_id":
+                latest_request_id = step["request_id"]
+            else:
+                raise ValueError(f"unsupported action: {action}")
 
         events_blob = engine.artifact_get(incident_id=incident_id, name="_events.ndjson")["content"]
         events = parse_ndjson(events_blob)
@@ -156,6 +177,7 @@ class Harness:
             "final_record_version": snapshot["record_version"],
             "events_schema_valid": len(schema_errors) == 0,
             "schema_errors": schema_errors,
+            "last_response": last_response,
         }
 
 

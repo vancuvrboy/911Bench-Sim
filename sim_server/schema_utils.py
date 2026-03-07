@@ -22,6 +22,12 @@ def validate_seed_triplet(caller_json: dict[str, Any], incident_json: dict[str, 
     _require(caller_json, "identity", "caller.json missing identity")
     if not isinstance(caller_json.get("identity"), dict) or not caller_json["identity"].get("name"):
         raise ValidationError("seed_validation_error", "caller.json missing identity.name")
+    allowed_disclosure = {"volunteer", "on_ask_once", "on_ask_twice", "after_reassurance", "refuse"}
+    disclosure = caller_json.get("disclosure_policy", {})
+    if isinstance(disclosure, dict):
+        for key, value in disclosure.items():
+            if value not in allowed_disclosure:
+                raise ValidationError("seed_validation_error", f"caller.json disclosure_policy invalid value for {key}")
 
     _require(incident_json, "id", "incident.json missing id")
     incident_type = incident_json.get("type")
