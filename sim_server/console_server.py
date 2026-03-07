@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from agents import CallTakerAgent, CallerAgent, QAEvaluatorAgent
 from sim_server import SimulationEngine
 from sim_server.errors import SimError
 from sim_server.schema_utils import load_json
@@ -27,6 +28,15 @@ class ConsoleState:
     caller_seed: dict[str, Any] | None = None
     incident_seed: dict[str, Any] | None = None
     qa_seed: dict[str, Any] | None = None
+    caller_agent_mode: str = "manual"
+    calltaker_agent_mode: str = "manual"
+    qa_agent_mode: str = "deterministic_v1"
+    caller_agent: CallerAgent | None = None
+    calltaker_agent: CallTakerAgent | None = None
+    qa_agent: QAEvaluatorAgent | None = None
+    replay_steps: list[dict[str, Any]] | None = None
+    replay_idx: int = 0
+    last_qa_score: dict[str, Any] | None = None
 
 
 class ConsoleHandler(BaseHTTPRequestHandler):
@@ -134,6 +144,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             )
             self._send_json(out)
             return
+        if path == "/api/agent/auto_step":
+            out = self._api_agent_auto_step(turns=int(payload.get("turns", 1)))
+            self._send_json(out)
+            return
+        if path == "/api/qa/evaluate":
+            out = self._api_qa_evaluate()
+            self._send_json(out)
+            return
 
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -144,6 +162,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         incident_fixture = str(payload.get("incident_fixture", "fixtures/incident_fire_residential.json"))
         qa_fixture = str(payload.get("qa_fixture", "fixtures/qaTemplate_003.json"))
         max_turns = int(payload.get("max_turns", 20))
+        caller_agent_mode = str(payload.get("caller_agent_mode", "manual"))
+        calltaker_agent_mode = str(payload.get("calltaker_agent_mode", "manual"))
+        qa_agent_mode = str(payload.get("qa_agent_mode", "deterministic_v1"))
 
         caller = load_json(root / caller_fixture)
         incident = load_json(root / incident_fixture)
@@ -165,6 +186,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.app.caller_seed = caller
         self.app.incident_seed = incident
         self.app.qa_seed = qa
+        self.app.caller_agent_mode = caller_agent_mode
+        self.app.calltaker_agent_mode = calltaker_agent_mode
+        self.app.qa_agent_mode = qa_agent_mode
+        self.app.caller_agent = CallerAgent(caller_json=caller, incident_json=incident) if caller_agent_mode == "deterministic_v1" else None
+        self.app.calltaker_agent = (
+            CallTakerAgent(incident_json=incident, dispatch_enabled=True) if calltaker_agent_mode == "deterministic_v1" else None
+        )
+        self.app.qa_agent = QAEvaluatorAgent(qa_template_json=qa) if qa_agent_mode in {"deterministic_v1", "replay"} else None
+        self.app.replay_steps = self._load_replay_for_console(scenario_id, incident)
+        self.app.replay_idx = 0
+        self.app.last_qa_score = None
         self._send_json({"loaded": loaded, "started": started})
 
     def _incident_or_400(self) -> str:
@@ -203,6 +235,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "scenario_id": self.app.scenario_id,
             "incident_id": incident_id,
             "phase": snapshot.get("episode_phase"),
+            "agent_modes": {
+                "caller": self.app.caller_agent_mode,
+                "calltaker": self.app.calltaker_agent_mode,
+                "qa": self.app.qa_agent_mode,
+            },
             "cad_state": snapshot.get("cad_state"),
             "record_version": snapshot.get("record_version"),
             "field_versions": snapshot.get("field_versions"),
@@ -218,7 +255,91 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "avg_checkpoint_latency_ms": avg_checkpoint_latency_ms,
                 "event_count": len(events),
             },
+            "last_qa_score": self.app.last_qa_score,
         }
+
+    def _api_agent_auto_step(self, turns: int = 1) -> dict[str, Any]:
+        incident_id = self._incident_or_400()
+        turns = max(1, min(20, turns))
+        executed = 0
+
+        for _ in range(turns):
+            snap = self.app.engine.plant_get_state_snapshot(incident_id)
+            if snap.get("episode_phase") == "sealed":
+                break
+
+            events = self.app.engine.episode_events(incident_id)
+            system_events = [ev for ev in events[-30:] if ev.get("event_type") == "system"]
+
+            if self.app.caller_agent_mode == "replay" or self.app.calltaker_agent_mode == "replay":
+                if not self.app.replay_steps or self.app.replay_idx >= len(self.app.replay_steps):
+                    break
+                step = self.app.replay_steps[self.app.replay_idx]
+                self.app.replay_idx += 1
+                caller_text = str(step.get("caller_text", ""))
+                caller_meta = step.get("caller_metadata") if isinstance(step.get("caller_metadata"), dict) else None
+                calltaker_text = str(step.get("calltaker_text", ""))
+                cad_updates = step.get("cad_updates") if isinstance(step.get("cad_updates"), dict) else {}
+                end_call = bool(step.get("end_call", False))
+                end_reason = str(step.get("end_reason", "other"))
+            else:
+                if not self.app.caller_agent or not self.app.calltaker_agent:
+                    raise SimError("agent_mode_invalid", "auto_step requires deterministic or replay agents")
+                last_ct = self._latest_calltaker_text(incident_id)
+                caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
+                decision = self.app.calltaker_agent.next_turn(
+                    caller_text=caller_text,
+                    cad_state=snap.get("cad_state", {}),
+                    system_events=system_events,
+                )
+                calltaker_text = decision.text
+                cad_updates = decision.cad_updates
+                end_call = bool(decision.end_call)
+                end_reason = str(decision.end_reason or "other")
+
+            self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
+            self.app.engine.calltaker_post_turn(incident_id=incident_id, text=calltaker_text, cad_updates=cad_updates)
+            executed += 1
+
+            if end_call:
+                self.app.engine.calltaker_end_call(incident_id=incident_id, reason=end_reason)
+                break
+
+        return {"status": "ok", "executed_turns": executed, "phase": self.app.engine.plant_get_state_snapshot(incident_id).get("episode_phase")}
+
+    def _api_qa_evaluate(self) -> dict[str, Any]:
+        incident_id = self._incident_or_400()
+        if self.app.qa_agent_mode == "manual" or self.app.qa_agent is None:
+            raise SimError("qa_mode_invalid", "qa agent mode is manual; cannot evaluate")
+
+        events = self.app.engine.episode_events(incident_id)
+        incident_type = str((self.app.incident_seed or {}).get("type", "Unknown"))
+        qa_score = self.app.qa_agent.evaluate(events=events, incident_type=incident_type)
+        self.app.last_qa_score = qa_score
+        return {"status": "ok", "qa_score": qa_score}
+
+    def _latest_calltaker_text(self, incident_id: str) -> str:
+        turns = self.app.engine.plant_get_transcript_since(incident_id, 0).get("turns", [])
+        if not turns:
+            return ""
+        return str(turns[-1].get("call_taker", ""))
+
+    def _load_replay_for_console(self, scenario_id: str, incident_seed: dict[str, Any]) -> list[dict[str, Any]] | None:
+        candidates: list[Path] = []
+        base = self.app.root / "fixtures" / "sim"
+        candidates.append(base / f"{scenario_id}_replay.json")
+        incident_type = str(incident_seed.get("type", "")).lower()
+        mapped = {
+            "fire": "phase1_fire_replay.json",
+            "police": "phase1_police_replay.json",
+            "ems": "phase1_ems_replay.json",
+        }.get(incident_type)
+        if mapped:
+            candidates.append(base / mapped)
+        for path in candidates:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        return None
 
     def _sop_snippets(self, incident_type: str, step: str) -> list[dict[str, str]]:
         by_type = {
@@ -313,4 +434,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

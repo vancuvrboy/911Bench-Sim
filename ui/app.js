@@ -131,6 +131,7 @@ function render(data) {
     escalation_depth: data.metrics?.escalation_queue_depth || 0,
     avg_checkpoint_latency_ms: data.metrics?.avg_checkpoint_latency_ms || 0,
     event_count: data.metrics?.event_count || 0,
+    agent_modes: data.agent_modes || {},
   });
   $("locationView").textContent = pretty(data.location_panel || {});
   $("cadView").textContent = pretty({
@@ -141,6 +142,9 @@ function render(data) {
   renderTranscript(data);
   renderInbox("checkpointInbox", data.checkpoint_inbox || [], false);
   renderInbox("escalationInbox", data.escalation_inbox || [], true);
+  if (data.last_qa_score) {
+    $("setupStatus").textContent = `QA score: ${Number(data.last_qa_score.normalized_score || 0).toFixed(2)}`;
+  }
 }
 
 async function refresh() {
@@ -159,6 +163,9 @@ async function setupEpisode() {
       caller_fixture: $("callerFixture").value,
       incident_fixture: $("incidentFixture").value,
       qa_fixture: $("qaFixture").value,
+      caller_agent_mode: $("callerAgentMode").value,
+      calltaker_agent_mode: $("calltakerAgentMode").value,
+      qa_agent_mode: $("qaAgentMode").value,
       max_turns: Number($("maxTurns").value || 20),
     };
     const out = await api.post("/api/admin/load_start", body);
@@ -212,6 +219,26 @@ async function endCall() {
   }
 }
 
+async function autoStep(turns = 1) {
+  try {
+    const out = await api.post("/api/agent/auto_step", { turns });
+    $("setupStatus").textContent = `Auto executed turns: ${out.executed_turns}`;
+    await refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function evalQa() {
+  try {
+    const out = await api.post("/api/qa/evaluate", {});
+    $("setupStatus").textContent = `QA score: ${Number(out.qa_score?.normalized_score || 0).toFixed(2)}`;
+    await refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 async function fetchSop() {
   const type = $("sopIncidentType").value;
   const step = $("sopStep").value;
@@ -247,6 +274,9 @@ function bind() {
   $("callerSendBtn").addEventListener("click", postCaller);
   $("ctSendBtn").addEventListener("click", postCallTaker);
   $("endCallBtn").addEventListener("click", endCall);
+  $("autoStepBtn").addEventListener("click", () => autoStep(1));
+  $("autoRun5Btn").addEventListener("click", () => autoStep(5));
+  $("qaEvalBtn").addEventListener("click", evalQa);
   $("sopFetchBtn").addEventListener("click", fetchSop);
   $("jumpBtn").addEventListener("click", jumpToTurn);
   $("searchBox").addEventListener("input", () => renderTranscript(state));
@@ -256,4 +286,3 @@ function bind() {
 bind();
 refresh();
 setInterval(refresh, 1200);
-

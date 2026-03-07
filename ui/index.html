@@ -46,6 +46,27 @@
             <option value="fixtures/qaTemplate_003.json">qaTemplate_003</option>
           </select>
         </label>
+        <label>Caller Agent
+          <select id="callerAgentMode">
+            <option value="manual">manual</option>
+            <option value="deterministic_v1" selected>deterministic_v1</option>
+            <option value="replay">replay</option>
+          </select>
+        </label>
+        <label>Call-Taker Agent
+          <select id="calltakerAgentMode">
+            <option value="manual">manual</option>
+            <option value="deterministic_v1" selected>deterministic_v1</option>
+            <option value="replay">replay</option>
+          </select>
+        </label>
+        <label>QA Agent
+          <select id="qaAgentMode">
+            <option value="manual">manual</option>
+            <option value="deterministic_v1" selected>deterministic_v1</option>
+            <option value="replay">replay</option>
+          </select>
+        </label>
         <label>Max Turns <input id="maxTurns" type="number" value="20" min="3" max="100" /></label>
       </div>
       <button id="loadStartBtn">Load + Start Episode</button>
@@ -101,7 +122,12 @@
       </section>
 
       <section class="card action">
-        <h2>Manual Turn Controls</h2>
+        <h2>Turn Controls</h2>
+        <div class="row-inline">
+          <button id="autoStepBtn">Auto Step (1)</button>
+          <button id="autoRun5Btn">Auto Run (5)</button>
+          <button id="qaEvalBtn">Evaluate QA</button>
+        </div>
         <label>Caller Text</label>
         <textarea id="callerText" rows="2"></textarea>
         <button id="callerSendBtn">Post Caller Turn</button>
@@ -138,4 +164,3 @@
     <script src="app.js"></script>
   </body>
   </html>
-
