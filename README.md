@@ -36,3 +36,17 @@ Replay recorded fixtures:
 ```bash
 python3 -m harness.sim_episode_runner --root . --output-dir tests/reports --mode replay
 ```
+
+## Section 2.6 Web Call Console UI
+
+Run the thin backend + single-page console:
+
+```bash
+python3 -m sim_server.console_server --root . --host 127.0.0.1 --port 8101
+```
+
+Open:
+
+```text
+http://127.0.0.1:8101
+```
