@@ -257,7 +257,16 @@ async function endCall() {
 async function autoStep(turns = 1) {
   try {
     const out = await api.post("/api/agent/auto_step", { turns });
-    $("setupStatus").textContent = `Auto executed turns: ${out.executed_turns}`;
+    const executed = Number(out.executed_turns || 0);
+    const queued = Number(out.queued_caller_turns || 0);
+    if (executed > 0) {
+      $("setupStatus").textContent = `Auto executed turns: ${executed}`;
+    } else if (queued > 0) {
+      const preview = String(out.last_queued_caller_text || "").slice(0, 80);
+      $("setupStatus").textContent = `Queued caller turn (${queued}). Awaiting manual call-taker response. ${preview}`;
+    } else {
+      $("setupStatus").textContent = "No auto turns executed.";
+    }
     await refresh();
   } catch (err) {
     alert(err.message);

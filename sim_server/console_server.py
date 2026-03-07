@@ -273,6 +273,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         incident_id = self._incident_or_400()
         turns = max(1, min(20, turns))
         executed = 0
+        queued_caller_turns = 0
+        posted_calltaker_turns = 0
+        last_queued_caller_text = ""
 
         for _ in range(turns):
             snap = self.app.engine.plant_get_state_snapshot(incident_id)
@@ -281,8 +284,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
             events = self.app.engine.episode_events(incident_id)
             system_events = [ev for ev in events[-30:] if ev.get("event_type") == "system"]
+            caller_manual = is_manual("caller", self.app.caller_agent_id)
+            calltaker_manual = is_manual("calltaker", self.app.calltaker_agent_id)
+            caller_replay = is_replay("caller", self.app.caller_agent_id)
+            calltaker_replay = is_replay("calltaker", self.app.calltaker_agent_id)
 
-            if is_replay("caller", self.app.caller_agent_id) or is_replay("calltaker", self.app.calltaker_agent_id):
+            if caller_manual and calltaker_manual:
+                raise SimError("agent_mode_invalid", "auto_step requires at least one callable or replay agent")
+
+            if caller_replay or calltaker_replay:
                 if not self.app.replay_steps or self.app.replay_idx >= len(self.app.replay_steps):
                     break
                 step = self.app.replay_steps[self.app.replay_idx]
@@ -294,29 +304,51 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 end_call = bool(step.get("end_call", False))
                 end_reason = str(step.get("end_reason", "other"))
             else:
-                if not self.app.caller_agent or not self.app.calltaker_agent:
-                    raise SimError("agent_mode_invalid", "auto_step requires callable or replay agents")
-                last_ct = self._latest_calltaker_text(incident_id)
-                caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
-                decision = self.app.calltaker_agent.next_turn(
-                    caller_text=caller_text,
-                    cad_state=snap.get("cad_state", {}),
-                    system_events=system_events,
-                )
-                calltaker_text = decision.text
-                cad_updates = decision.cad_updates
-                end_call = bool(decision.end_call)
-                end_reason = str(decision.end_reason or "other")
+                caller_text = ""
+                caller_meta = None
+                calltaker_text = ""
+                cad_updates = {}
+                end_call = False
+                end_reason = "other"
+                if not caller_manual:
+                    if not self.app.caller_agent:
+                        raise SimError("agent_mode_invalid", "caller profile is not callable")
+                    last_ct = self._latest_calltaker_text(incident_id)
+                    caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
+                if not calltaker_manual:
+                    if not self.app.calltaker_agent:
+                        raise SimError("agent_mode_invalid", "calltaker profile is not callable")
+                    input_caller_text = caller_text if caller_text else self._pending_or_latest_caller_text(incident_id)
+                    decision = self.app.calltaker_agent.next_turn(
+                        caller_text=input_caller_text,
+                        cad_state=snap.get("cad_state", {}),
+                        system_events=system_events,
+                    )
+                    calltaker_text = decision.text
+                    cad_updates = decision.cad_updates
+                    end_call = bool(decision.end_call)
+                    end_reason = str(decision.end_reason or "other")
 
-            self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
-            self.app.engine.calltaker_post_turn(incident_id=incident_id, text=calltaker_text, cad_updates=cad_updates)
-            executed += 1
+            if not caller_manual:
+                self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
+                queued_caller_turns += 1
+                last_queued_caller_text = caller_text
+            if not calltaker_manual:
+                self.app.engine.calltaker_post_turn(incident_id=incident_id, text=calltaker_text, cad_updates=cad_updates)
+                posted_calltaker_turns += 1
+                executed += 1
+                if end_call:
+                    self.app.engine.calltaker_end_call(incident_id=incident_id, reason=end_reason)
+                    break
 
-            if end_call:
-                self.app.engine.calltaker_end_call(incident_id=incident_id, reason=end_reason)
-                break
-
-        return {"status": "ok", "executed_turns": executed, "phase": self.app.engine.plant_get_state_snapshot(incident_id).get("episode_phase")}
+        return {
+            "status": "ok",
+            "executed_turns": executed,
+            "queued_caller_turns": queued_caller_turns,
+            "posted_calltaker_turns": posted_calltaker_turns,
+            "last_queued_caller_text": last_queued_caller_text,
+            "phase": self.app.engine.plant_get_state_snapshot(incident_id).get("episode_phase"),
+        }
 
     def _api_qa_evaluate(self) -> dict[str, Any]:
         incident_id = self._incident_or_400()
@@ -334,6 +366,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not turns:
             return ""
         return str(turns[-1].get("call_taker", ""))
+
+    def _pending_or_latest_caller_text(self, incident_id: str) -> str:
+        # Console backend has direct in-process access to episode state.
+        ep = self.app.engine._get_episode(incident_id)  # type: ignore[attr-defined]
+        pending = str(getattr(ep, "pending_caller_text", "") or "")
+        if pending:
+            return pending
+        turns = self.app.engine.plant_get_transcript_since(incident_id, 0).get("turns", [])
+        if not turns:
+            return ""
+        return str(turns[-1].get("caller", ""))
 
     def _load_replay_for_console(self, scenario_id: str, incident_seed: dict[str, Any]) -> list[dict[str, Any]] | None:
         candidates: list[Path] = []
