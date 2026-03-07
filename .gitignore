@@ -8,3 +8,5 @@ tests/results/run_*/
 tests/reports/*.json
 tests/reports/*.csv
 tests/reports/sim_run_*/
+
+tests/reports/

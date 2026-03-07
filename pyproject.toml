@@ -5,4 +5,4 @@ description = "911Bench standalone SIM server"
 requires-python = ">=3.12"
 
 [tool.setuptools.packages.find]
-include = ["sim_server*", "tests*"]
+include = ["sim_server*", "tests*", "agents*", "harness*"]
