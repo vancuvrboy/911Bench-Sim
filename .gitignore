@@ -4,3 +4,7 @@ __pycache__/
 tests/results/*.json
 tests/results/*.csv
 tests/results/run_*/
+
+tests/reports/*.json
+tests/reports/*.csv
+tests/reports/sim_run_*/

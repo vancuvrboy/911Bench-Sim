@@ -1,0 +1,32 @@
+[
+  {
+    "test_id": "EVNT-001",
+    "category": "event_logger",
+    "script": [
+      {"action": "load_scenario"}, {"action": "start_episode"},
+      {"action": "caller_turn", "text": "hello"}, {"action": "calltaker_turn", "text": "hi"},
+      {"action": "emit_event", "event": {"event_type": "governance_correlation", "action_id": "a1", "matched_rule_ids": ["r1"], "policy_id": "p1", "evaluation_trace": []}},
+      {"action": "end_call", "reason": "resolved_no_dispatch"}
+    ],
+    "expected": {"events_schema_valid": true}
+  },
+  {
+    "test_id": "EVNT-002",
+    "category": "event_logger",
+    "script": [
+      {"action": "load_scenario"}, {"action": "start_episode"},
+      {"action": "caller_turn", "text": "a"}, {"action": "calltaker_turn", "text": "b"},
+      {"action": "end_call", "reason": "resolved_no_dispatch"}
+    ],
+    "expected": {"events_schema_valid": true}
+  },
+  {
+    "test_id": "EVNT-010",
+    "category": "event_logger",
+    "script": [
+      {"action": "load_scenario"}, {"action": "start_episode"},
+      {"action": "emit_event", "event": {}}
+    ],
+    "expected": {"error_contains": "event missing event_type"}
+  }
+]

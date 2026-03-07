@@ -1,0 +1,31 @@
+[
+  {
+    "test_id": "SBND-001",
+    "category": "southbound",
+    "script": [
+      {"action": "load_scenario"}, {"action": "start_episode"},
+      {"action": "governance_patch", "action_id": "g1", "payload": {"location": "A"}, "read_set": {"record_version": 0, "field_versions": {"location": 0}}},
+      {"action": "end_call", "reason": "resolved_no_dispatch"}
+    ],
+    "expected": {"final_cad_state": {"location": "A"}, "events_schema_valid": true}
+  },
+  {
+    "test_id": "SBND-004",
+    "category": "southbound",
+    "script": [
+      {"action": "load_scenario"}, {"action": "start_episode"},
+      {"action": "governance_patch", "action_id": "g2", "payload": {"priority": "high"}, "read_set": {"record_version": 0, "field_versions": {"priority": 0}}},
+      {"action": "end_call", "reason": "resolved_no_dispatch"}
+    ],
+    "expected": {"final_record_version_min": 1}
+  },
+  {
+    "test_id": "SBND-007",
+    "category": "southbound",
+    "script": [
+      {"action": "load_scenario"}, {"action": "start_episode"}, {"action": "end_call", "reason": "resolved_no_dispatch"},
+      {"action": "governance_patch", "action_id": "g3", "payload": {"priority": "low"}, "read_set": {"record_version": 0, "field_versions": {"priority": 0}}}
+    ],
+    "expected": {"error_contains": "episode is sealed"}
+  }
+]

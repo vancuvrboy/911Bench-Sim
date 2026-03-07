@@ -1,0 +1,66 @@
+[
+  {
+    "test_id": "TERM-001",
+    "category": "termination",
+    "script": [
+      {"action": "load_scenario", "incident_json": "fixtures/incident_fire_quick.json"},
+      {"action": "start_episode"},
+      {"action": "caller_turn", "text": "fire"},
+      {"action": "calltaker_turn", "text": "dispatching", "cad_updates": {"dispatch_triggered": true}},
+      {"action": "caller_turn", "text": "ok"},
+      {"action": "calltaker_turn", "text": "units arrived"},
+      {"action": "end_call", "reason": "responders_arrived"}
+    ],
+    "expected": {"event_types_present": ["system", "episode_end"], "events_schema_valid": true}
+  },
+  {
+    "test_id": "TERM-008",
+    "category": "termination",
+    "script": [
+      {"action": "load_scenario"},
+      {"action": "start_episode"},
+      {"action": "caller_turn", "text": "non emergency"},
+      {"action": "calltaker_turn", "text": "closing"},
+      {"action": "end_call", "reason": "resolved_no_dispatch"}
+    ],
+    "expected": {"episode_sealed": true}
+  },
+  {
+    "test_id": "TERM-009",
+    "category": "termination",
+    "script": [
+      {"action": "load_scenario", "incident_json": "fixtures/incident_fire_quick.json"},
+      {"action": "start_episode"},
+      {"action": "caller_turn", "text": "fire"},
+      {"action": "calltaker_turn", "text": "dispatching", "cad_updates": {"dispatch_triggered": true}},
+      {"action": "end_call", "reason": "resolved_no_dispatch"}
+    ],
+    "expected": {"error_contains": "dispatch already triggered"}
+  },
+  {
+    "test_id": "TERM-010",
+    "category": "termination",
+    "script": [
+      {"action": "load_scenario", "incident_json": "fixtures/incident_max_turns_5.json"},
+      {"action": "start_episode"},
+      {"action": "caller_turn", "text": "1"}, {"action": "calltaker_turn", "text": "1"},
+      {"action": "caller_turn", "text": "2"}, {"action": "calltaker_turn", "text": "2"},
+      {"action": "caller_turn", "text": "3"}, {"action": "calltaker_turn", "text": "3"},
+      {"action": "caller_turn", "text": "4"}, {"action": "calltaker_turn", "text": "4"},
+      {"action": "caller_turn", "text": "5"}, {"action": "calltaker_turn", "text": "5"}
+    ],
+    "expected": {"event_types_present": ["episode_end", "system"], "events_schema_valid": true}
+  },
+  {
+    "test_id": "TERM-015",
+    "category": "termination",
+    "script": [
+      {"action": "load_scenario"},
+      {"action": "start_episode"},
+      {"action": "caller_turn", "text": "line dropped"},
+      {"action": "calltaker_turn", "text": "attempt callback"},
+      {"action": "end_call", "reason": "caller_disconnected"}
+    ],
+    "expected": {"event_types_present": ["system", "episode_end"], "events_schema_valid": true}
+  }
+]
