@@ -219,6 +219,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not self.app.incident_id:
             return {"loaded": False}
         incident_id = self.app.incident_id
+        ep = self.app.engine._get_episode(incident_id)  # type: ignore[attr-defined]
         snapshot = self.app.engine.plant_get_state_snapshot(incident_id)
         events = self.app.engine.episode_events(incident_id)
         transcript = [ev for ev in events if ev.get("event_type") == "conversation"]
@@ -251,6 +252,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "calltaker": self.app.calltaker_agent_id,
                 "qa": self.app.qa_agent_id,
             },
+            "pending_turn": int(getattr(ep, "awaiting_caller_for_turn", 0)),
+            "pending_caller_text": str(getattr(ep, "pending_caller_text", "") or ""),
+            "pending_caller_metadata": getattr(ep, "pending_caller_metadata", None),
             "cad_state": snapshot.get("cad_state"),
             "record_version": snapshot.get("record_version"),
             "field_versions": snapshot.get("field_versions"),

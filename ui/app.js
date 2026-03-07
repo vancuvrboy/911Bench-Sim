@@ -55,6 +55,17 @@ function renderTranscript(data) {
     }
     list.appendChild(caller);
   });
+
+  const pendingCaller = String(data.pending_caller_text || "");
+  if (pendingCaller) {
+    const pending = document.createElement("div");
+    pending.className = "bubble caller";
+    pending.innerHTML = `<div class="meta">Turn ${Number(data.pending_turn || 0)} · Caller (queued)</div><div>${escapeHtml(pendingCaller)}</div>`;
+    if (mode === "detailed" && data.pending_caller_metadata) {
+      pending.innerHTML += `<div class="meta">metadata: ${escapeHtml(JSON.stringify(data.pending_caller_metadata))}</div>`;
+    }
+    list.appendChild(pending);
+  }
 }
 
 function renderInbox(targetId, reqs, isEscalation = false) {
@@ -133,6 +144,8 @@ function render(data) {
     avg_checkpoint_latency_ms: data.metrics?.avg_checkpoint_latency_ms || 0,
     event_count: data.metrics?.event_count || 0,
     agent_profiles: data.agent_profiles || {},
+    pending_turn: data.pending_turn || 0,
+    has_pending_caller: Boolean(data.pending_caller_text),
   });
   $("locationView").textContent = pretty(data.location_panel || {});
   $("cadView").textContent = pretty({
