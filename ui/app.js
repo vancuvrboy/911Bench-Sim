@@ -159,19 +159,27 @@ async function refresh() {
 
 async function setupEpisode() {
   try {
+    const callerAgentId = $("callerAgentId").value;
+    const calltakerAgentId = $("calltakerAgentId").value;
+    const qaAgentId = $("qaAgentId").value;
     const body = {
       scenario_id: $("scenarioId").value,
       caller_fixture: $("callerFixture").value,
       incident_fixture: $("incidentFixture").value,
       qa_fixture: $("qaFixture").value,
-      caller_agent_id: $("callerAgentId").value,
-      calltaker_agent_id: $("calltakerAgentId").value,
-      qa_agent_id: $("qaAgentId").value,
+      caller_agent_id: callerAgentId,
+      calltaker_agent_id: calltakerAgentId,
+      qa_agent_id: qaAgentId,
       max_turns: Number($("maxTurns").value || 20),
     };
     const out = await api.post("/api/admin/load_start", body);
     $("setupStatus").textContent = `Loaded ${out.loaded.incident_id} and started episode`;
     await refresh();
+    if (callerAgentId === "replay" || calltakerAgentId === "replay" || qaAgentId === "replay") {
+      const replayOut = await api.post("/api/agent/auto_step", { turns: 1 });
+      $("setupStatus").textContent = `Loaded ${out.loaded.incident_id}; replay advanced ${replayOut.executed_turns} turn`;
+      await refresh();
+    }
   } catch (err) {
     $("setupStatus").textContent = err.message;
   }
