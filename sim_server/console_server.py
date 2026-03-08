@@ -444,15 +444,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 cad_updates = {}
                 end_call = False
                 end_reason = "other"
-                if not caller_manual:
-                    if not self.app.caller_agent:
-                        raise SimError("agent_mode_invalid", "caller profile is not callable")
-                    last_ct = self._latest_calltaker_text(incident_id)
-                    caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
                 if not calltaker_manual:
                     if not self.app.calltaker_agent:
                         raise SimError("agent_mode_invalid", "calltaker profile is not callable")
-                    input_caller_text = caller_text if caller_text else self._pending_or_latest_caller_text(incident_id)
+                    input_caller_text = self._pending_or_latest_caller_text(incident_id)
                     pending_checkpoints = self.app.engine.checkpoint_list(
                         incident_id=incident_id,
                         status_filter="pending",
@@ -468,6 +463,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     cad_updates = decision.cad_updates
                     end_call = bool(decision.end_call)
                     end_reason = str(decision.end_reason or "other")
+                if not caller_manual:
+                    if not self.app.caller_agent:
+                        raise SimError("agent_mode_invalid", "caller profile is not callable")
+                    ct_input = calltaker_text if calltaker_text else self._latest_calltaker_text(incident_id)
+                    caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=ct_input, system_events=system_events)
 
             if not caller_manual:
                 self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)

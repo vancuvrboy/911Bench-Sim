@@ -10,6 +10,7 @@ max_completion_tokens: 500
 max_tool_rounds: 6
 enable_map_tool: true
 checkpoint_strategy: llm_evaluate
+opening_greeting: "This is 911. Do you need Police, Fire or Ambulance?"
 system_prompt: |
   You are simulating a 911 call-taker chatbot in a real-time, text-based emergency scenario.
   Interact calmly and professionally while gathering structured, actionable information.

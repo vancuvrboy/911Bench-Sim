@@ -306,6 +306,9 @@ def create_calltaker_agent(
         return None
     if profile.provider == "builtin":
         return CallTakerAgent(incident_json=incident_json, temperature=profile.temperature, **kwargs)
+    # OpenAI call-taker profiles run incident-blind by default. They infer details
+    # through caller dialogue and tool-returned runtime state, not seed injection.
+    runtime_incident: dict[str, Any] = {}
     cfg = _load_agent_config(config_root=config_root, role="calltaker", agent_id=agent_id)
     adapter = str(cfg.get("adapter", "")).strip().lower()
     if not adapter:
@@ -313,12 +316,12 @@ def create_calltaker_agent(
     if adapter in {"openai_calltaker_synthetic", "openai_synthetic"}:
         return _create_openai_synthetic_calltaker(
             profile,
-            incident_json,
+            runtime_incident,
             qa_template_json=qa_template_json or {},
             agent_config=cfg,
         )
     if adapter in {"openai_calltaker_json", "openai_chat_json"}:
-        return _create_openai_calltaker(profile, incident_json, agent_config=cfg)
+        return _create_openai_calltaker(profile, runtime_incident, agent_config=cfg)
     raise ValueError(f"unsupported calltaker adapter: {adapter}")
 
 
@@ -516,6 +519,13 @@ class OpenAICallTakerAgent:
             )
         )
         self.incident_json = incident_json
+        self.opening_greeting = str(
+            cfg.get(
+                "opening_greeting",
+                "This is 911. Do you need Police, Fire or Ambulance?",
+            )
+        ).strip()
+        self._opening_sent = False
         self._fallback = CallTakerAgent(incident_json=incident_json, temperature=temperature)
 
     def next_turn(
@@ -526,6 +536,9 @@ class OpenAICallTakerAgent:
         pending_checkpoints: list[dict[str, Any]] | None = None,
     ) -> CTDecision:
         try:
+            if not self._opening_sent and not str(caller_text or "").strip():
+                self._opening_sent = True
+                return CTDecision(text=self.opening_greeting, cad_updates={}, end_call=False)
             prompt = (
                 f"caller_text={caller_text}\n"
                 f"cad_state={json.dumps(cad_state)}\n"
@@ -575,6 +588,12 @@ class OpenAISyntheticCallTakerAgent:
         self.max_tool_rounds = int(cfg.get("max_tool_rounds", 6))
         self.enable_map_tool = bool(cfg.get("enable_map_tool", True))
         self.checkpoint_strategy = str(cfg.get("checkpoint_strategy", "llm_evaluate")).strip().lower()
+        self.opening_greeting = str(
+            cfg.get(
+                "opening_greeting",
+                "This is 911. Do you need Police, Fire or Ambulance?",
+            )
+        ).strip()
         self.system_prompt = str(
             cfg.get(
                 "system_prompt",
@@ -590,6 +609,7 @@ class OpenAISyntheticCallTakerAgent:
         self._pending_end_call: dict[str, Any] = {}
         self._pending_checkpoint_decisions: list[dict[str, Any]] = []
         self._pending_checkpoints: list[dict[str, Any]] = []
+        self._opening_sent = False
 
     def next_turn(
         self,
@@ -603,6 +623,9 @@ class OpenAISyntheticCallTakerAgent:
         self._pending_checkpoint_decisions = []
         self._pending_checkpoints = list(pending_checkpoints or [])
         try:
+            if not self._opening_sent and not str(caller_text or "").strip():
+                self._opening_sent = True
+                return CTDecision(text=self.opening_greeting, cad_updates={}, end_call=False)
             if self._pending_checkpoints and self.checkpoint_strategy in {"auto_approve", "auto-deny", "auto_deny"}:
                 auto_decision = "approved" if self.checkpoint_strategy == "auto_approve" else "denied"
                 checkpoint_decisions = [
