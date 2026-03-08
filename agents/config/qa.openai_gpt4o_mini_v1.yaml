@@ -6,6 +6,20 @@ adapter: openai_qa_json
 description: OpenAI QA adapter (JSON rubric scoring)
 model: gpt-4o-mini
 temperature: 0.0
+use_responses_api: true
+max_output_tokens: 900
+parse_retry_max: 2
 system_prompt: |
   You are a QA evaluator for 911 calls.
-  Return strict JSON matching the deterministic QA output schema.
+  Score the transcript against the provided QA template.
+  Return JSON only. No markdown.
+  Required top-level fields:
+  - evaluator_agent_id (string)
+  - qa_template_id (string)
+  - incident_type (string)
+  - sections_applied (array of strings)
+  - items (array of objects with: id, answer, points_awarded, points_possible, rationale, evidence_turns)
+  - total_points_awarded (number)
+  - total_points_possible (number)
+  - normalized_score (0..100 number)
+  Use conservative scoring and cite evidence_turns where possible.

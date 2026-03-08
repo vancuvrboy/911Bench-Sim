@@ -1063,6 +1063,9 @@ class OpenAIQAEvaluatorAgent:
         self.client = _create_openai_client()
         self.model = str(cfg.get("model", model))
         self.temperature = float(cfg.get("temperature", temperature))
+        self.max_output_tokens = int(cfg.get("max_output_tokens", 900))
+        self.parse_retry_max = int(cfg.get("parse_retry_max", 2))
+        self.use_responses_api = bool(cfg.get("use_responses_api", True))
         self.system_prompt = str(
             cfg.get(
                 "system_prompt",
@@ -1073,23 +1076,161 @@ class OpenAIQAEvaluatorAgent:
         self._fallback = QAEvaluatorAgent(qa_template_json=qa_template_json, temperature=temperature)
 
     def evaluate(self, events: list[dict[str, Any]], incident_type: str) -> dict[str, Any]:
+        transcript = self._conversation_rows(events)
+        packet = {
+            "incident_type": incident_type,
+            "qa_template": self.qa_template_json,
+            "transcript": transcript[-80:],
+            "required_output_fields": [
+                "evaluator_agent_id",
+                "qa_template_id",
+                "incident_type",
+                "sections_applied",
+                "items",
+                "total_points_awarded",
+                "total_points_possible",
+                "normalized_score",
+            ],
+        }
+        prompt = json.dumps(packet)
+        last_error_code = "unknown"
+        retries = 0
+        for attempt in range(max(1, self.parse_retry_max + 1)):
+            try:
+                if self.use_responses_api:
+                    resp = self.client.responses.create(
+                        model=self.model,
+                        temperature=self.temperature,
+                        max_output_tokens=self.max_output_tokens,
+                        input=[
+                            {"role": "system", "content": self.system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                    )
+                    response_id = str(getattr(resp, "id", "")).strip()
+                    raw = self._extract_text(resp)
+                else:
+                    resp = self.client.chat.completions.create(
+                        model=self.model,
+                        temperature=self.temperature,
+                        messages=[
+                            {"role": "system", "content": self.system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                    )
+                    response_id = ""
+                    raw = str(resp.choices[0].message.content or "").strip()
+                parsed = self._parse_json_payload(raw)
+                normalized = self._normalize_score_payload(parsed, incident_type=incident_type)
+                normalized["parse_retry_count"] = retries
+                normalized["evaluator_model"] = self.model
+                normalized["evaluator_source"] = "openai_responses" if self.use_responses_api else "openai_chat"
+                normalized["evaluator_response_id"] = response_id
+                normalized["fallback"] = False
+                return normalized
+            except Exception as exc:
+                last_error_code = type(exc).__name__
+                retries = attempt + 1
+                continue
+        fallback = self._fallback.evaluate(events=events, incident_type=incident_type)
+        fallback["evaluator_source"] = "builtin_fallback"
+        fallback["fallback"] = True
+        fallback["error_code"] = last_error_code
+        return fallback
+
+    def _parse_json_payload(self, raw: str) -> dict[str, Any]:
+        text = str(raw or "").strip()
+        if not text:
+            raise ValueError("empty_qa_output")
         try:
-            prompt = f"incident_type={incident_type}\nevents={json.dumps(events[-30:])}\n"
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                temperature=self.temperature,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            raw = (resp.choices[0].message.content or "").strip()
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict) or "normalized_score" not in parsed:
-                raise ValueError("invalid_openai_qa_payload")
-            return parsed
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj
         except Exception:
-            return self._fallback.evaluate(events=events, incident_type=incident_type)
+            pass
+        m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not m:
+            raise ValueError("invalid_qa_json")
+        obj = json.loads(m.group(0))
+        if not isinstance(obj, dict):
+            raise ValueError("invalid_qa_json_object")
+        return obj
+
+    def _normalize_score_payload(self, obj: dict[str, Any], incident_type: str) -> dict[str, Any]:
+        if "normalized_score" not in obj:
+            raise ValueError("qa_missing_normalized_score")
+        items = obj.get("items") if isinstance(obj.get("items"), list) else []
+        norm_items: list[dict[str, Any]] = []
+        awarded = 0.0
+        possible = 0.0
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            pa = float(it.get("points_awarded", 0.0) or 0.0)
+            pp = float(it.get("points_possible", 0.0) or 0.0)
+            awarded += pa
+            possible += pp
+            norm_items.append(
+                {
+                    "id": str(it.get("id", "unknown")),
+                    "answer": str(it.get("answer", "NO")),
+                    "points_awarded": pa,
+                    "points_possible": pp,
+                    "rationale": str(it.get("rationale", "")),
+                    "evidence_turns": [int(x) for x in it.get("evidence_turns", []) if isinstance(x, (int, float))],
+                }
+            )
+        total_awarded = float(obj.get("total_points_awarded", awarded) or awarded)
+        total_possible = float(obj.get("total_points_possible", possible) or possible)
+        normalized = float(obj.get("normalized_score", 0.0) or 0.0)
+        qa_template_id = str(obj.get("qa_template_id", self.qa_template_json.get("version", "unknown")))
+        sections = obj.get("sections_applied")
+        if not isinstance(sections, list):
+            sections = ["COMMON", str(incident_type).upper()]
+        return {
+            "evaluator_agent_id": str(obj.get("evaluator_agent_id", "qa-agent")),
+            "qa_template_id": qa_template_id,
+            "incident_type": str(obj.get("incident_type", incident_type)),
+            "sections_applied": [str(s) for s in sections],
+            "items": norm_items,
+            "total_points_awarded": total_awarded,
+            "total_points_possible": total_possible,
+            "normalized_score": max(0.0, min(100.0, normalized)),
+            "parse_retry_count": 0,
+        }
+
+    def _conversation_rows(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for ev in events:
+            if ev.get("event_type") != "conversation":
+                continue
+            rows.append(
+                {
+                    "turn": int(ev.get("turn", 0) or 0),
+                    "call_taker": str(ev.get("call_taker", "")),
+                    "caller": str(ev.get("caller", "")),
+                }
+            )
+        return rows
+
+    def _extract_text(self, resp: Any) -> str:
+        output_text = str(getattr(resp, "output_text", "") or "").strip()
+        if output_text:
+            return output_text
+        output = getattr(resp, "output", None)
+        if isinstance(output, list):
+            chunks: list[str] = []
+            for item in output:
+                content = getattr(item, "content", None)
+                if isinstance(content, list):
+                    for part in content:
+                        txt = str(getattr(part, "text", "") or "").strip()
+                        if txt:
+                            chunks.append(txt)
+            joined = "\n".join(chunks).strip()
+            if joined:
+                return joined
+        return ""
 
 
 def _create_openai_caller(
