@@ -1,4 +1,27 @@
-"""Role-based agent provider registry for deterministic/replay/OpenAI agents."""
+"""Role-based agent provider registry for deterministic/replay/OpenAI agents.
+
+Developer extension guide (plug-and-play profiles):
+1) Add or update a profile YAML in `agents/config/` using the naming pattern:
+   - `<role>.<profile_id>.yaml` where role is one of: `caller`, `calltaker`, `qa`.
+2) Put profile metadata in YAML (single source of truth for non-builtin profiles):
+   - `id`, `role`, `provider`, `mode`, `adapter`, `description`
+   - plus runtime fields such as `model`, `temperature`, prompt text/files, limits, strategy flags.
+3) Provider discovery:
+   - `list_profiles()` and `get_profile()` load builtins + YAML profiles.
+   - Builtins (`manual`, `deterministic_v1`, `replay`) remain code defaults for safety.
+4) Adapter dispatch:
+   - `create_caller_agent`, `create_calltaker_agent`, `create_qa_agent`
+     select implementation by YAML `adapter` value.
+   - If you can reuse an existing adapter, no Python changes are needed.
+5) Adding a new adapter type (Python change required once):
+   - Implement a class and constructor helper.
+   - Add one adapter mapping branch in the relevant `create_*_agent` function.
+   - After that, new profiles can use that adapter via YAML only.
+6) Tool-capable agents:
+   - Define tool schemas in class method `_tool_specs()`.
+   - Implement behavior in `_exec_tool()`.
+   - Execute tool loop inside `next_turn()`.
+"""
 
 from __future__ import annotations
 
