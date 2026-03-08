@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-
 
 from agents.caller_agent import CallerAgent
 from agents.calltaker_agent import CTDecision, CallTakerAgent
@@ -243,54 +243,43 @@ class OpenAICallerAgent:
         self.model = str(cfg.get("model", model))
         self.temperature = float(cfg.get("temperature", temperature))
         self.max_output_tokens = int(cfg.get("max_output_tokens", 120))
+        self.use_previous_response_id = bool(cfg.get("use_previous_response_id", True))
         self.system_prompt = str(
             cfg.get(
                 "system_prompt",
-                "You are role-playing a 911 caller in a training simulator. Speak naturally as a stressed but cooperative caller. "
-                "Only output the caller utterance text, no JSON, no labels, no analysis.",
+                "You are simulating a 911 caller in a real-time emergency scenario. "
+                "Stay fully in character and respond only as the caller would speak.",
             )
         )
         self.caller_json = caller_json
         self.incident_json = incident_json
+        self.turn_index = 0
+        self.previous_response_id: str | None = None
+        self._seeded = False
+        self._history: list[dict[str, str]] = []
+        self._max_history_turns = int(cfg.get("max_history_turns", 10))
         self._fallback = CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=temperature)
 
-    def _user_prompt(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> str:
-        identity = self.caller_json.get("identity", {}) if isinstance(self.caller_json.get("identity"), dict) else {}
-        speech = self.caller_json.get("speech", {}) if isinstance(self.caller_json.get("speech"), dict) else {}
-        incident_location = self.incident_json.get("location", {}) if isinstance(self.incident_json.get("location"), dict) else {}
-        caller_view = self.incident_json.get("caller_view", {}) if isinstance(self.incident_json.get("caller_view"), dict) else {}
-
-        seed_context = {
-            "caller_profile_id": self.caller_json.get("profile_id", "CALLER-UNKNOWN"),
-            "caller_identity": {
-                "name": identity.get("name"),
-                "callback_number": identity.get("phone_number"),
-            },
-            "speech_style": {
-                "tone": speech.get("tone"),
-                "pace": speech.get("pace"),
-                "disfluencies": speech.get("disfluencies", []),
-            },
-            "disclosure_policy": self.caller_json.get("disclosure_policy", {}),
-            "example_short_answers": self.caller_json.get("example_short_answers", {}),
-            "incident_type": self.incident_json.get("type", "Unknown"),
-            "incident_location": {
-                "address_line": incident_location.get("address_line"),
-                "city": incident_location.get("city"),
-            },
-            "caller_view": {
-                "opening_line": caller_view.get("initial_opening_line"),
-                "known_facts": caller_view.get("known_facts", []),
-            },
-            "progression_by_turn": self.incident_json.get("progression_by_turn", []),
+    def _seed_packet(self) -> str:
+        payload = {
+            "caller_profile": self.caller_json,
+            "incident_details": self.incident_json,
         }
-
         return (
-            "Generate the next caller utterance for this exact seeded scenario.\n"
-            f"seed_context={json.dumps(seed_context)}\n"
-            f"latest_call_taker_text={call_taker_text}\n"
-            f"recent_system_events={json.dumps(system_events[-4:])}\n"
-            "Output only the caller text."
+            "Use this structured seed data for internal behavior only. "
+            "Do not quote it or mention it directly.\n"
+            f"seed_json={json.dumps(payload)}"
+        )
+
+    def _turn_update_packet(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> str:
+        self.turn_index += 1
+        return (
+            f"turn_index={self.turn_index}\n"
+            "[SYSTEM]\n"
+            f"recent_system_events={json.dumps(system_events[-5:])}\n"
+            "[/SYSTEM]\n"
+            f"call_taker_utterance={call_taker_text}\n"
+            "Respond with caller speech only."
         )
 
     def _extract_text(self, resp: Any) -> str:
@@ -312,20 +301,53 @@ class OpenAICallerAgent:
                 return joined
         return ""
 
+    def _clean_speech(self, text: str) -> str:
+        cleaned = re.sub(r"\*(.*?)\*", "", text)
+        cleaned = re.sub(r"\[(.*?)\]", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _fallback_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+        return self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
+
     def next_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+        turn_packet = self._turn_update_packet(call_taker_text, system_events)
         try:
-            resp = self.client.responses.create(
-                model=self.model,
-                temperature=self.temperature,
-                max_output_tokens=self.max_output_tokens,
-                input=[
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "temperature": self.temperature,
+                "max_output_tokens": self.max_output_tokens,
+            }
+
+            if self.use_previous_response_id and self._seeded and self.previous_response_id:
+                kwargs["previous_response_id"] = self.previous_response_id
+                kwargs["input"] = [{"role": "user", "content": turn_packet}]
+            else:
+                input_msgs: list[dict[str, Any]] = [
                     {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": self._user_prompt(call_taker_text, system_events)},
-                ],
-            )
-            text = self._extract_text(resp)
+                    {"role": "user", "content": self._seed_packet()},
+                ]
+                if self._history:
+                    for item in self._history[-(self._max_history_turns * 2) :]:
+                        input_msgs.append(item)
+                input_msgs.append({"role": "user", "content": turn_packet})
+                kwargs["input"] = input_msgs
+
+            resp = self.client.responses.create(**kwargs)
+            text = self._clean_speech(self._extract_text(resp))
             if not text:
                 raise ValueError("empty_openai_responses_output")
+
+            response_id = str(getattr(resp, "id", "")).strip()
+            self.previous_response_id = response_id or self.previous_response_id
+            self._seeded = True
+            self._history.extend(
+                [
+                    {"role": "user", "content": turn_packet},
+                    {"role": "assistant", "content": text},
+                ]
+            )
+
             _, fallback_meta = self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
             meta = dict(fallback_meta)
             meta.update(
@@ -333,12 +355,13 @@ class OpenAICallerAgent:
                     "model_provider": "openai",
                     "model": self.model,
                     "api": "responses",
-                    "response_id": str(getattr(resp, "id", "")),
+                    "response_id": response_id,
+                    "seed_mode": "full_json_seed_once_then_incremental_turn_updates",
                 }
             )
             return text, meta
         except Exception:
-            return self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
+            return self._fallback_turn(call_taker_text=call_taker_text, system_events=system_events)
 
 
 class OpenAICallTakerAgent:

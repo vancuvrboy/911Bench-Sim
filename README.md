@@ -79,4 +79,4 @@ Caller model/prompt settings are loaded from YAML config files at startup (one f
 - `agents/config/calltaker.openai_gpt4o_mini_v1.yaml`
 - `agents/config/qa.openai_gpt4o_mini_v1.yaml`
 
-The caller adapter uses OpenAI `responses.create(...)` and falls back to deterministic caller behavior if generation fails.
+The caller adapter seeds full `caller.json` and `incident.json` into the conversation at episode start, then sends incremental turn updates each step using Responses API continuity (`previous_response_id`) when available. It falls back to deterministic caller behavior if generation fails.
