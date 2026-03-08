@@ -149,6 +149,39 @@ function renderSop(snippets) {
   });
 }
 
+function renderSystemMessages(data) {
+  const root = $("systemMessagesView");
+  if (!root) return;
+  const calltakerId = data.agent_profiles?.calltaker || $("calltakerAgentId").value;
+  const calltakerProfile = profileFor("calltaker", calltakerId);
+  const isManualCallTaker = calltakerProfile && calltakerProfile.mode === "manual";
+  const events = (data.system_events || []).filter((ev) => ev && ev.event_type === "system");
+
+  if (!isManualCallTaker) {
+    root.innerHTML = "<div class='meta'>Select manual Call-Taker to view live system notifications here.</div>";
+    return;
+  }
+  if (events.length === 0) {
+    root.innerHTML = "<div class='meta'>No system messages yet.</div>";
+    return;
+  }
+
+  root.innerHTML = "";
+  events.slice(-12).forEach((ev) => {
+    const subtype = String(ev.subtype || "generic");
+    const row = document.createElement("div");
+    let cls = "system-message";
+    if (subtype === "responders_arrived") cls += " arrived";
+    if (subtype === "responders_dispatched") cls += " dispatched";
+    row.className = cls;
+    row.innerHTML = `
+      <div class="meta">Turn ${Number(ev.turn || 0)} · ${escapeHtml(subtype)}</div>
+      <div>${escapeHtml(String(ev.text || ""))}</div>
+    `;
+    root.appendChild(row);
+  });
+}
+
 function render(data) {
   state = data;
   $("metricsView").textContent = pretty({
@@ -172,6 +205,7 @@ function render(data) {
     field_versions: data.field_versions || {},
   });
   renderTranscript(data);
+  renderSystemMessages(data);
   renderInbox("checkpointInbox", data.checkpoint_inbox || [], false);
   renderInbox("escalationInbox", data.escalation_inbox || [], true);
   if (data.last_qa_score) {
