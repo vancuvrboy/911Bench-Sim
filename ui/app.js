@@ -18,6 +18,8 @@ const api = {
 
 let state = { loaded: false };
 let agentCatalog = [];
+let liveSource = null;
+let lastTranscriptSig = "";
 
 function $(id) {
   return document.getElementById(id);
@@ -28,10 +30,21 @@ function pretty(obj) {
 }
 
 function renderTranscript(data) {
+  const mode = $("verbosity").value;
+  const search = ($("searchBox").value || "").toLowerCase();
+  const sig = JSON.stringify({
+    transcript: data.transcript || [],
+    pending_turn: data.pending_turn || 0,
+    pending_caller_text: data.pending_caller_text || "",
+    pending_caller_metadata: data.pending_caller_metadata || null,
+    mode,
+    search,
+  });
+  if (sig === lastTranscriptSig) return;
+  lastTranscriptSig = sig;
+
   const list = $("transcriptList");
   list.innerHTML = "";
-  const search = ($("searchBox").value || "").toLowerCase();
-  const mode = $("verbosity").value;
   const rows = (data.transcript || []).filter((row) => {
     if (!search) return true;
     return (
@@ -171,6 +184,27 @@ async function refresh() {
   }
 }
 
+function closeLiveStream() {
+  if (liveSource) {
+    liveSource.close();
+    liveSource = null;
+  }
+}
+
+function openLiveStream() {
+  closeLiveStream();
+  const incident = state.incident_id ? `?incident_id=${encodeURIComponent(state.incident_id)}` : "";
+  liveSource = new EventSource(`/api/events/stream${incident}`);
+  liveSource.addEventListener("state", (evt) => {
+    try {
+      const payload = JSON.parse(evt.data || "{}");
+      if (payload && payload.state) render(payload.state);
+    } catch {
+      // ignore malformed frame
+    }
+  });
+}
+
 async function setupEpisode() {
   try {
     const callerAgentId = $("callerAgentId").value;
@@ -189,6 +223,7 @@ async function setupEpisode() {
     const out = await api.post("/api/admin/load_start", body);
     $("setupStatus").textContent = `Loaded ${out.loaded.incident_id} and started episode`;
     await refresh();
+    openLiveStream();
     if (callerAgentId === "replay" || calltakerAgentId === "replay" || qaAgentId === "replay") {
       const replayOut = await api.post("/api/agent/auto_step", { turns: 1 });
       $("setupStatus").textContent = `Loaded ${out.loaded.incident_id}; replay advanced ${replayOut.executed_turns} turn`;
@@ -342,5 +377,7 @@ function bind() {
 }
 
 bind();
-loadAgentCatalog().then(refresh);
-setInterval(refresh, 1200);
+loadAgentCatalog().then(async () => {
+  await refresh();
+  openLiveStream();
+});

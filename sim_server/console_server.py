@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,6 +104,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 rows = [t for t in rows if search in str(t.get("caller", "")).lower() or search in str(t.get("call_taker", "")).lower()]
             self._send_json({"turns": rows})
             return
+        if path == "/api/events/stream":
+            self._handle_sse_stream(query)
+            return
         if path == "/api/sop":
             incident_type = (query.get("incident_type", ["Fire"])[0] or "Fire").title()
             step = (query.get("step", ["initial"])[0] or "initial").lower()
@@ -110,6 +114,63 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._log_sop_retrieval(incident_type, step)
             return
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+
+    def _state_signature(self, data: dict[str, Any]) -> tuple[Any, ...]:
+        metrics = data.get("metrics", {}) if isinstance(data.get("metrics"), dict) else {}
+        return (
+            bool(data.get("loaded")),
+            str(data.get("incident_id", "")),
+            str(data.get("phase", "")),
+            int(data.get("record_version", 0) or 0),
+            int(metrics.get("event_count", 0) or 0),
+            int(data.get("pending_turn", 0) or 0),
+            str(data.get("pending_caller_text", "")),
+            len(data.get("checkpoint_inbox", []) or []),
+            len(data.get("escalation_inbox", []) or []),
+        )
+
+    def _sse_write(self, event_name: str, payload: dict[str, Any]) -> None:
+        blob = json.dumps(payload, ensure_ascii=True)
+        self.wfile.write(f"event: {event_name}\n".encode("utf-8"))
+        self.wfile.write(f"data: {blob}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _handle_sse_stream(self, query: dict[str, list[str]]) -> None:
+        requested_incident = (query.get("incident_id", [""])[0] or "").strip()
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        last_sig: tuple[Any, ...] | None = None
+        heartbeat_counter = 0
+        while True:
+            if self.app.incident_id and (not requested_incident or requested_incident == self.app.incident_id):
+                data = self._state_payload()
+            else:
+                data = {
+                    "loaded": bool(self.app.incident_id),
+                    "incident_id": self.app.incident_id,
+                    "phase": None,
+                    "metrics": {"event_count": 0},
+                    "checkpoint_inbox": [],
+                    "escalation_inbox": [],
+                }
+            sig = self._state_signature(data)
+            try:
+                if sig != last_sig:
+                    self._sse_write("state", {"state": data})
+                    last_sig = sig
+                else:
+                    heartbeat_counter += 1
+                    if heartbeat_counter % 15 == 0:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                time.sleep(0.35)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     def _handle_api_post(self, path: str, payload: dict[str, Any]) -> None:
         if path == "/api/admin/load_start":
