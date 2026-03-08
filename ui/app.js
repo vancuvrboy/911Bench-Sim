@@ -75,9 +75,11 @@ function renderTranscript(data) {
 
   const pendingCaller = String(data.pending_caller_text || "");
   if (pendingCaller) {
+    const pendingTurn = Number(data.pending_turn || 0);
+    const displayTurn = Math.max(1, pendingTurn - 1);
     const pending = document.createElement("div");
     pending.className = "bubble caller";
-    pending.innerHTML = `<div class="meta">Turn ${Number(data.pending_turn || 0)} · Caller (queued)</div><div>${escapeHtml(pendingCaller)}</div>`;
+    pending.innerHTML = `<div class="meta">Turn ${displayTurn} · Caller (queued)</div><div>${escapeHtml(pendingCaller)}</div>`;
     list.appendChild(pending);
   }
 }
