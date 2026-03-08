@@ -7,7 +7,8 @@ description: OpenAI synthetic call-taker with tool loop
 model: gpt-4o-mini
 temperature: 0.1
 max_completion_tokens: 500
-max_tool_rounds: 6
+use_previous_response_id: true
+max_history_turns: 20
 enable_map_tool: true
 checkpoint_strategy: llm_evaluate
 opening_greeting: "This is 911. Do you need Police, Fire or Ambulance?"

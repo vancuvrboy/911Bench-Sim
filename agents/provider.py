@@ -626,7 +626,8 @@ class OpenAISyntheticCallTakerAgent:
         self.model = str(cfg.get("model", model))
         self.temperature = float(cfg.get("temperature", temperature))
         self.max_completion_tokens = int(cfg.get("max_completion_tokens", 500))
-        self.max_tool_rounds = int(cfg.get("max_tool_rounds", 6))
+        self.use_previous_response_id = bool(cfg.get("use_previous_response_id", True))
+        self.max_history_turns = int(cfg.get("max_history_turns", 20))
         self.enable_map_tool = bool(cfg.get("enable_map_tool", True))
         self.checkpoint_strategy = str(cfg.get("checkpoint_strategy", "llm_evaluate")).strip().lower()
         self.opening_greeting = str(
@@ -651,6 +652,9 @@ class OpenAISyntheticCallTakerAgent:
         self._pending_checkpoint_decisions: list[dict[str, Any]] = []
         self._pending_checkpoints: list[dict[str, Any]] = []
         self._opening_sent = False
+        self._seeded = False
+        self.previous_response_id: str | None = None
+        self._history: list[dict[str, str]] = []
 
     def _fallback_decision(
         self,
@@ -714,111 +718,68 @@ class OpenAISyntheticCallTakerAgent:
                         "fallback": False,
                     },
                 )
-
-            tools = self._tool_specs()
-            user_payload = {
-                "caller_text": caller_text,
-                "cad_state": cad_state,
-                "system_events": system_events[-5:],
-                "incident_type": self.incident_json.get("type"),
-                "pending_checkpoints": self._pending_checkpoints,
+            turn_packet = self._turn_packet(caller_text, cad_state, system_events, self._pending_checkpoints)
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "temperature": self.temperature,
+                "max_output_tokens": self.max_completion_tokens,
             }
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": json.dumps(user_payload)},
-            ]
+            if self.use_previous_response_id and self._seeded and self.previous_response_id:
+                kwargs["previous_response_id"] = self.previous_response_id
+                kwargs["input"] = [{"role": "user", "content": turn_packet}]
+            else:
+                input_msgs: list[dict[str, Any]] = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": self._seed_packet()},
+                ]
+                if self._history:
+                    input_msgs.extend(self._history[-(self.max_history_turns * 2) :])
+                input_msgs.append({"role": "user", "content": turn_packet})
+                kwargs["input"] = input_msgs
 
-            for _ in range(max(1, self.max_tool_rounds)):
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    temperature=self.temperature,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    max_completion_tokens=self.max_completion_tokens,
-                )
-                msg = resp.choices[0].message
-                tool_calls = list(getattr(msg, "tool_calls", []) or [])
-                if tool_calls:
-                    assistant_tool_msg: dict[str, Any] = {
-                        "role": "assistant",
-                        "content": msg.content or "",
-                        "tool_calls": [],
-                    }
-                    for tc in tool_calls:
-                        tname = str(getattr(getattr(tc, "function", None), "name", "") or "")
-                        targs_raw = str(getattr(getattr(tc, "function", None), "arguments", "") or "{}")
-                        tc_id = str(getattr(tc, "id", "") or "")
-                        assistant_tool_msg["tool_calls"].append(
-                            {
-                                "id": tc_id,
-                                "type": "function",
-                                "function": {"name": tname, "arguments": targs_raw},
-                            }
-                        )
-                    messages.append(assistant_tool_msg)
-
-                    for tc in tool_calls:
-                        tname = str(getattr(getattr(tc, "function", None), "name", "") or "")
-                        targs_raw = str(getattr(getattr(tc, "function", None), "arguments", "") or "{}")
-                        tc_id = str(getattr(tc, "id", "") or "")
-                        try:
-                            targs = json.loads(targs_raw) if targs_raw else {}
-                            if not isinstance(targs, dict):
-                                targs = {}
-                        except Exception:
-                            targs = {}
-                        result = self._exec_tool(
-                            tool_name=tname,
-                            args=targs,
-                            cad_state=cad_state,
-                            system_events=system_events,
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc_id,
-                                "content": json.dumps(result),
-                            }
-                        )
-                    continue
-
-                parsed = self._parse_ct_json(msg.content or "")
-                cad_updates = parsed.get("cad_updates") if isinstance(parsed.get("cad_updates"), dict) else {}
-                merged_updates = dict(self._pending_updates)
-                merged_updates.update(cad_updates)
-                parsed_checkpoint_decisions = (
-                    parsed.get("checkpoint_decisions")
-                    if isinstance(parsed.get("checkpoint_decisions"), list)
-                    else []
-                )
-                merged_checkpoint_decisions = list(self._pending_checkpoint_decisions)
-                merged_checkpoint_decisions.extend(parsed_checkpoint_decisions)
-                end_call = bool(parsed.get("end_call", False) or self._pending_end_call.get("end_call", False))
-                end_reason = parsed.get("end_reason") if parsed.get("end_reason") else self._pending_end_call.get("end_reason")
-                end_reason_detail = (
-                    parsed.get("end_reason_detail")
-                    if parsed.get("end_reason_detail")
-                    else self._pending_end_call.get("end_reason_detail")
-                )
-                return CTDecision(
-                    text=str(parsed.get("text", "") or "Acknowledged."),
-                    cad_updates=merged_updates,
-                    end_call=end_call,
-                    end_reason=str(end_reason) if end_reason else None,
-                    end_reason_detail=str(end_reason_detail) if end_reason_detail else None,
-                    checkpoint_decisions=[d for d in merged_checkpoint_decisions if isinstance(d, dict)],
-                    call_taker_metadata={
-                        "agent_profile_id": "openai_synthetic_v1",
-                        "source": "openai_synthetic",
-                        "fallback": False,
-                    },
-                )
-            return self._fallback_decision(
-                caller_text=caller_text,
-                cad_state=cad_state,
-                system_events=system_events,
-                reason="tool_round_limit",
+            resp = self.client.responses.create(**kwargs)
+            response_id = str(getattr(resp, "id", "")).strip()
+            self.previous_response_id = response_id or self.previous_response_id
+            self._seeded = True
+            raw_text = self._extract_text(resp)
+            parsed = self._parse_ct_json(raw_text)
+            text_out = str(parsed.get("text", "") or "Acknowledged.")
+            self._history.extend(
+                [
+                    {"role": "user", "content": turn_packet},
+                    {"role": "assistant", "content": text_out},
+                ]
+            )
+            cad_updates = parsed.get("cad_updates") if isinstance(parsed.get("cad_updates"), dict) else {}
+            merged_updates = dict(self._pending_updates)
+            merged_updates.update(cad_updates)
+            parsed_checkpoint_decisions = (
+                parsed.get("checkpoint_decisions")
+                if isinstance(parsed.get("checkpoint_decisions"), list)
+                else []
+            )
+            merged_checkpoint_decisions = list(self._pending_checkpoint_decisions)
+            merged_checkpoint_decisions.extend(parsed_checkpoint_decisions)
+            end_call = bool(parsed.get("end_call", False) or self._pending_end_call.get("end_call", False))
+            end_reason = parsed.get("end_reason") if parsed.get("end_reason") else self._pending_end_call.get("end_reason")
+            end_reason_detail = (
+                parsed.get("end_reason_detail")
+                if parsed.get("end_reason_detail")
+                else self._pending_end_call.get("end_reason_detail")
+            )
+            return CTDecision(
+                text=text_out,
+                cad_updates=merged_updates,
+                end_call=end_call,
+                end_reason=str(end_reason) if end_reason else None,
+                end_reason_detail=str(end_reason_detail) if end_reason_detail else None,
+                checkpoint_decisions=[d for d in merged_checkpoint_decisions if isinstance(d, dict)],
+                call_taker_metadata={
+                    "agent_profile_id": "openai_synthetic_v1",
+                    "source": "openai_responses",
+                    "response_id": response_id,
+                    "fallback": False,
+                },
             )
         except Exception as exc:
             return self._fallback_decision(
@@ -828,6 +789,55 @@ class OpenAISyntheticCallTakerAgent:
                 reason="exception",
                 error_code=type(exc).__name__,
             )
+
+    def _seed_packet(self) -> str:
+        payload = {
+            "qa_template": self.qa_template_json,
+            "tool_contract": {
+                "write_cad": "Provide CAD updates in cad_updates object.",
+                "end_call": "Set end_call=true and provide end_reason/end_reason_detail when call should close.",
+                "checkpoints": "Return checkpoint_decisions array when pending checkpoints exist.",
+            },
+        }
+        return (
+            "Use this structured seed data for internal behavior only. "
+            "Do not quote it to the caller.\n"
+            f"seed_json={json.dumps(payload)}"
+        )
+
+    def _turn_packet(
+        self,
+        caller_text: str,
+        cad_state: dict[str, Any],
+        system_events: list[dict[str, Any]],
+        pending_checkpoints: list[dict[str, Any]],
+    ) -> str:
+        payload = {
+            "caller_text": caller_text,
+            "cad_state": cad_state,
+            "system_events": system_events[-8:],
+            "pending_checkpoints": pending_checkpoints,
+        }
+        return json.dumps(payload)
+
+    def _extract_text(self, resp: Any) -> str:
+        output_text = str(getattr(resp, "output_text", "") or "").strip()
+        if output_text:
+            return output_text
+        output = getattr(resp, "output", None)
+        if isinstance(output, list):
+            chunks: list[str] = []
+            for item in output:
+                content = getattr(item, "content", None)
+                if isinstance(content, list):
+                    for part in content:
+                        txt = str(getattr(part, "text", "") or "").strip()
+                        if txt:
+                            chunks.append(txt)
+            joined = "\n".join(chunks).strip()
+            if joined:
+                return joined
+        return ""
 
     def _parse_ct_json(self, raw: str) -> dict[str, Any]:
         text = str(raw or "").strip()

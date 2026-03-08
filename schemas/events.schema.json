@@ -82,6 +82,7 @@
             "properties": {
               "agent_profile_id": { "type": "string" },
               "source": { "type": "string" },
+              "response_id": { "type": "string" },
               "fallback": { "type": "boolean" },
               "fallback_reason": { "type": "string" },
               "error_code": { "type": "string" }

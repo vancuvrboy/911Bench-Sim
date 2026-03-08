@@ -770,7 +770,7 @@ class SimulationEngine:
     def _sanitize_call_taker_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(metadata, dict):
             return None
-        allowed_keys = {"agent_profile_id", "source", "fallback", "fallback_reason", "error_code"}
+        allowed_keys = {"agent_profile_id", "source", "response_id", "fallback", "fallback_reason", "error_code"}
         cleaned = {k: metadata[k] for k in allowed_keys if k in metadata}
         if not cleaned:
             return None
