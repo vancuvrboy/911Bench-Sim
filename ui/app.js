@@ -336,6 +336,17 @@ async function evalQa() {
   }
 }
 
+async function saveArtifacts() {
+  try {
+    const out = await api.post("/api/artifacts/save", { reason: "ui_export" });
+    const art = out.artifact || {};
+    $("setupStatus").textContent = `Artifacts saved: ${art.episode_dir || ""}`;
+    await refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 async function fetchSop() {
   const type = $("sopIncidentType").value;
   const step = $("sopStep").value;
@@ -374,6 +385,7 @@ function bind() {
   $("autoStepBtn").addEventListener("click", () => autoStep(1));
   $("autoRun5Btn").addEventListener("click", () => autoStep(5));
   $("qaEvalBtn").addEventListener("click", evalQa);
+  $("saveArtifactsBtn").addEventListener("click", saveArtifacts);
   $("sopFetchBtn").addEventListener("click", fetchSop);
   $("jumpBtn").addEventListener("click", jumpToTurn);
   $("searchBox").addEventListener("input", () => renderTranscript(state));

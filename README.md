@@ -42,7 +42,13 @@ python3 -m harness.sim_episode_runner --root . --output-dir tests/reports --mode
 Run the thin backend + single-page console:
 
 ```bash
-python3 -m sim_server.console_server --root . --host 127.0.0.1 --port 8101 --agent-config-dir agents/config
+python3 -m sim_server.console_server \
+  --root . \
+  --host 127.0.0.1 \
+  --port 8101 \
+  --agent-config-dir agents/config \
+  --artifacts-dir runs \
+  --run-id run_$(date +%Y%m%d_%H%M%S)
 ```
 
 Open:
@@ -80,3 +86,26 @@ Caller model/prompt settings are loaded from YAML config files at startup (one f
 - `agents/config/qa.openai_gpt4o_mini_v1.yaml`
 
 The caller adapter seeds full `caller.json` and `incident.json` into the conversation at episode start, then sends incremental turn updates each step using Responses API continuity (`previous_response_id`) when available. It falls back to deterministic caller behavior if generation fails.
+
+## Runtime Artifact Storage (non-test simulations)
+
+Artifacts for console/headless simulation episodes are saved under:
+
+```text
+runs/<run_id>/<scenario_id>/<episode_id>/
+```
+
+Each episode folder contains:
+
+- `_events.ndjson`
+- `transcript.json`
+- `meta.json`
+- `qa_score.json` (if QA score exists)
+
+`episode_id` is auto-derived as `<incident_id>__<sealed_timestamp>`.
+
+Notes:
+- `run_id` groups many episodes for batch/headless execution.
+- auto-save on episode seal is enabled by default.
+- disable auto-save with `--no-auto-save-on-end`.
+- manual export is available via UI (`Save Artifacts`) and API (`POST /api/artifacts/save`).

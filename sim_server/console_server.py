@@ -7,7 +7,8 @@ import json
 import mimetypes
 import time
 import uuid
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,6 +48,10 @@ class ConsoleState:
     calltaker_agent: CallTakerAgent | None = None
     qa_agent: QAEvaluatorAgent | None = None
     agent_config_root: Path | None = None
+    artifacts_root: Path | None = None
+    run_id: str = ""
+    auto_save_on_end: bool = True
+    saved_artifacts: list[dict[str, Any]] = field(default_factory=list)
     replay_steps: list[dict[str, Any]] | None = None
     replay_idx: int = 0
     last_qa_score: dict[str, Any] | None = None
@@ -208,6 +213,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 text=call_taker_text,
                 cad_updates=cad_updates,
             )
+            self._maybe_autosave_sealed(incident_id, reason="calltaker_turn")
             self._send_json(out)
             return
         if path == "/api/end_call":
@@ -216,6 +222,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 reason=str(payload.get("reason", "other")),
                 reason_detail=str(payload.get("reason_detail", "")) or None,
             )
+            self._maybe_autosave_sealed(incident_id, reason="end_call")
             self._send_json(out)
             return
         if path == "/api/checkpoint/request":
@@ -234,10 +241,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/agent/auto_step":
             out = self._api_agent_auto_step(turns=int(payload.get("turns", 1)))
+            self._maybe_autosave_sealed(incident_id, reason="auto_step")
             self._send_json(out)
             return
         if path == "/api/qa/evaluate":
             out = self._api_qa_evaluate()
+            self._send_json(out)
+            return
+        if path == "/api/artifacts/save":
+            out = self._api_artifacts_save(payload)
+            self._send_json(out)
+            return
+        if path == "/api/artifacts/list":
+            out = self._api_artifacts_list(payload)
             self._send_json(out)
             return
 
@@ -295,6 +311,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             qa_template_json=qa,
             config_root=self.app.agent_config_root,
         )
+        if self.app.saved_artifacts is None:
+            self.app.saved_artifacts = []
         self.app.replay_steps = self._load_replay_for_console(scenario_id, incident)
         self.app.replay_idx = 0
         self.app.last_qa_score = None
@@ -368,6 +386,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "event_count": len(events),
             },
             "last_qa_score": self.app.last_qa_score,
+            "artifacts": {
+                "run_id": self.app.run_id,
+                "auto_save_on_end": bool(self.app.auto_save_on_end),
+                "saved_count": len(self.app.saved_artifacts or []),
+                "last_saved": (self.app.saved_artifacts[-1] if self.app.saved_artifacts else None),
+            },
         }
 
     def _api_agent_auto_step(self, turns: int = 1) -> dict[str, Any]:
@@ -461,6 +485,96 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         qa_score = self.app.qa_agent.evaluate(events=events, incident_type=incident_type)
         self.app.last_qa_score = qa_score
         return {"status": "ok", "qa_score": qa_score}
+
+    def _agent_config_manifest(self) -> dict[str, Any]:
+        manifest: dict[str, Any] = {}
+        root = self.app.agent_config_root
+        if root is None:
+            return manifest
+        role_to_profile = {
+            "caller": self.app.caller_agent_id,
+            "calltaker": self.app.calltaker_agent_id,
+            "qa": self.app.qa_agent_id,
+        }
+        for role, profile_id in role_to_profile.items():
+            path = root / f"{role}.{profile_id}.yaml"
+            if not path.exists():
+                continue
+            raw = path.read_bytes()
+            manifest[role] = {
+                "profile_id": profile_id,
+                "config_file": str(path),
+                "config_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        return manifest
+
+    def _artifact_extra_meta(self, incident_id: str) -> dict[str, Any]:
+        return {
+            "console_runtime": {
+                "run_id": self.app.run_id,
+                "auto_save_on_end": bool(self.app.auto_save_on_end),
+                "agent_profiles": {
+                    "caller": self.app.caller_agent_id,
+                    "calltaker": self.app.calltaker_agent_id,
+                    "qa": self.app.qa_agent_id,
+                },
+                "agent_config": self._agent_config_manifest(),
+            },
+            "fixture_refs": {
+                "incident_id": incident_id,
+            },
+        }
+
+    def _save_current_episode_artifacts(self, incident_id: str, reason: str) -> dict[str, Any]:
+        if self.app.artifacts_root is None:
+            raise SimError("artifacts_root_unset", "artifact root is not configured")
+        saved = self.app.engine.save_artifact_bundle(
+            incident_id=incident_id,
+            output_root=self.app.artifacts_root,
+            run_id=self.app.run_id,
+            qa_score=self.app.last_qa_score,
+            extra_meta=self._artifact_extra_meta(incident_id) | {"save_reason": reason},
+        )
+        if self.app.saved_artifacts is None:
+            self.app.saved_artifacts = []
+        self.app.saved_artifacts.append(saved)
+        return saved
+
+    def _maybe_autosave_sealed(self, incident_id: str, reason: str) -> None:
+        if not self.app.auto_save_on_end:
+            return
+        phase = self.app.engine.plant_get_state_snapshot(incident_id).get("episode_phase")
+        if phase != "sealed":
+            return
+        if self.app.saved_artifacts and self.app.saved_artifacts[-1].get("incident_id") == incident_id:
+            return
+        self._save_current_episode_artifacts(incident_id=incident_id, reason=reason)
+
+    def _api_artifacts_save(self, payload: dict[str, Any]) -> dict[str, Any]:
+        incident_id = str(payload.get("incident_id", "")).strip() or self._incident_or_400()
+        reason = str(payload.get("reason", "manual_export"))
+        return {"status": "saved", "artifact": self._save_current_episode_artifacts(incident_id=incident_id, reason=reason)}
+
+    def _api_artifacts_list(self, payload: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(payload.get("run_id", "")).strip() or self.app.run_id
+        root = self.app.artifacts_root or (self.app.root / "runs")
+        run_root = root / run_id
+        rows: list[dict[str, Any]] = []
+        if run_root.exists():
+            for meta_path in sorted(run_root.rglob("meta.json")):
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                rows.append(
+                    {
+                        "episode_dir": str(meta_path.parent),
+                        "scenario_id": meta.get("scenario_id"),
+                        "incident_id": meta.get("incident_id"),
+                        "end_ts": meta.get("end_ts"),
+                    }
+                )
+        return {"run_id": run_id, "root": str(run_root), "episodes": rows}
 
     def _latest_calltaker_text(self, incident_id: str) -> str:
         turns = self.app.engine.plant_get_transcript_since(incident_id, 0).get("turns", [])
@@ -599,21 +713,28 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8101)
     parser.add_argument("--agent-config-dir", default="agents/config")
+    parser.add_argument("--artifacts-dir", default="runs")
+    parser.add_argument("--run-id", default="")
+    parser.add_argument("--no-auto-save-on-end", action="store_true")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     ui_root = root / "ui"
+    run_id = str(args.run_id).strip() or f"run_{int(time.time())}"
     state = ConsoleState(
         root=root,
         ui_root=ui_root,
         engine=SimulationEngine(execution_id="console-init"),
         agent_config_root=(root / args.agent_config_dir).resolve(),
+        artifacts_root=(root / args.artifacts_dir).resolve(),
+        run_id=run_id,
+        auto_save_on_end=not bool(args.no_auto_save_on_end),
     )
 
     server = ThreadingHTTPServer((args.host, args.port), ConsoleHandler)
     server.app_state = state  # type: ignore[attr-defined]
 
-    print(f"SIM console server listening on http://{args.host}:{args.port}")
+    print(f"SIM console server listening on http://{args.host}:{args.port} (run_id={run_id})")
     server.serve_forever()
 
 
