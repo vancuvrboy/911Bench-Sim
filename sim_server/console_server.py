@@ -311,6 +311,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.app.calltaker_agent = create_calltaker_agent(
             calltaker_agent_id,
             incident_json=incident,
+            qa_template_json=qa,
             dispatch_enabled=True,
             config_root=self.app.agent_config_root,
         )
@@ -452,10 +453,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     if not self.app.calltaker_agent:
                         raise SimError("agent_mode_invalid", "calltaker profile is not callable")
                     input_caller_text = caller_text if caller_text else self._pending_or_latest_caller_text(incident_id)
+                    pending_checkpoints = self.app.engine.checkpoint_list(
+                        incident_id=incident_id,
+                        status_filter="pending",
+                        role_filter="call_taker",
+                    ).get("requests", [])
                     decision = self.app.calltaker_agent.next_turn(
                         caller_text=input_caller_text,
                         cad_state=snap.get("cad_state", {}),
                         system_events=system_events,
+                        pending_checkpoints=pending_checkpoints,
                     )
                     calltaker_text = decision.text
                     cad_updates = decision.cad_updates
@@ -468,6 +475,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 last_queued_caller_text = caller_text
             if not calltaker_manual:
                 self.app.engine.calltaker_post_turn(incident_id=incident_id, text=calltaker_text, cad_updates=cad_updates)
+                for cp in getattr(decision, "checkpoint_decisions", []) if not calltaker_replay else []:
+                    if not isinstance(cp, dict):
+                        continue
+                    req_id = str(cp.get("request_id", "")).strip()
+                    cp_decision = str(cp.get("decision", "")).strip()
+                    if not req_id or not cp_decision:
+                        continue
+                    self.app.engine.checkpoint_submit(
+                        request_id=req_id,
+                        decision=cp_decision,
+                        edited_payload=cp.get("edited_payload") if isinstance(cp.get("edited_payload"), dict) else None,
+                        re_escalate_to=str(cp.get("re_escalate_to", "")).strip() or None,
+                        rationale=str(cp.get("rationale", "")).strip() or None,
+                    )
                 posted_calltaker_turns += 1
                 executed += 1
                 if end_call:

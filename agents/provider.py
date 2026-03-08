@@ -99,6 +99,15 @@ _CATALOG: list[AgentProfile] = [
         mode="callable",
     ),
     AgentProfile(
+        id="openai_synthetic_v1",
+        role="calltaker",
+        provider="openai",
+        model="gpt-4o-mini",
+        temperature=0.1,
+        description="OpenAI synthetic call-taker with tool loop",
+        mode="callable",
+    ),
+    AgentProfile(
         id="manual",
         role="qa",
         provider="builtin",
@@ -175,6 +184,7 @@ def create_caller_agent(
 def create_calltaker_agent(
     agent_id: str,
     incident_json: dict[str, Any],
+    qa_template_json: dict[str, Any] | None = None,
     *,
     config_root: str | Path | None = None,
     **kwargs: Any,
@@ -185,6 +195,13 @@ def create_calltaker_agent(
     if profile.provider == "builtin":
         return CallTakerAgent(incident_json=incident_json, temperature=profile.temperature, **kwargs)
     cfg = _load_agent_config(config_root=config_root, role="calltaker", agent_id=agent_id)
+    if profile.id == "openai_synthetic_v1":
+        return _create_openai_synthetic_calltaker(
+            profile,
+            incident_json,
+            qa_template_json=qa_template_json or {},
+            agent_config=cfg,
+        )
     return _create_openai_calltaker(profile, incident_json, agent_config=cfg)
 
 
@@ -388,12 +405,19 @@ class OpenAICallTakerAgent:
         self.incident_json = incident_json
         self._fallback = CallTakerAgent(incident_json=incident_json, temperature=temperature)
 
-    def next_turn(self, caller_text: str, cad_state: dict[str, Any], system_events: list[dict[str, Any]]) -> CTDecision:
+    def next_turn(
+        self,
+        caller_text: str,
+        cad_state: dict[str, Any],
+        system_events: list[dict[str, Any]],
+        pending_checkpoints: list[dict[str, Any]] | None = None,
+    ) -> CTDecision:
         try:
             prompt = (
                 f"caller_text={caller_text}\n"
                 f"cad_state={json.dumps(cad_state)}\n"
                 f"system_events={json.dumps(system_events[-3:])}\n"
+                f"pending_checkpoints={json.dumps(pending_checkpoints or [])}\n"
             )
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -412,9 +436,381 @@ class OpenAICallTakerAgent:
                 cad_updates=obj.get("cad_updates") if isinstance(obj.get("cad_updates"), dict) else {},
                 end_call=bool(obj.get("end_call", False)),
                 end_reason=str(obj.get("end_reason")) if obj.get("end_reason") else None,
+                end_reason_detail=str(obj.get("end_reason_detail")) if obj.get("end_reason_detail") else None,
+                checkpoint_decisions=(
+                    obj.get("checkpoint_decisions") if isinstance(obj.get("checkpoint_decisions"), list) else []
+                ),
             )
         except Exception:
             return self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+
+
+class OpenAISyntheticCallTakerAgent:
+    def __init__(
+        self,
+        model: str,
+        temperature: float,
+        incident_json: dict[str, Any],
+        qa_template_json: dict[str, Any],
+        agent_config: dict[str, Any] | None = None,
+    ) -> None:
+        cfg = agent_config or {}
+        self.client = _create_openai_client()
+        self.model = str(cfg.get("model", model))
+        self.temperature = float(cfg.get("temperature", temperature))
+        self.max_completion_tokens = int(cfg.get("max_completion_tokens", 500))
+        self.max_tool_rounds = int(cfg.get("max_tool_rounds", 6))
+        self.enable_map_tool = bool(cfg.get("enable_map_tool", True))
+        self.checkpoint_strategy = str(cfg.get("checkpoint_strategy", "llm_evaluate")).strip().lower()
+        self.system_prompt = str(
+            cfg.get(
+                "system_prompt",
+                "You are a synthetic 911 call-taker agent. Use tools to gather SOP/CAD/QA/map context and decide CAD updates. "
+                "Return strict JSON with keys text(str), cad_updates(object), end_call(bool), end_reason(str|null), "
+                "end_reason_detail(str|null), checkpoint_decisions(array).",
+            )
+        )
+        self.incident_json = incident_json
+        self.qa_template_json = qa_template_json
+        self._fallback = CallTakerAgent(incident_json=incident_json, temperature=temperature)
+        self._pending_updates: dict[str, Any] = {}
+        self._pending_end_call: dict[str, Any] = {}
+        self._pending_checkpoint_decisions: list[dict[str, Any]] = []
+        self._pending_checkpoints: list[dict[str, Any]] = []
+
+    def next_turn(
+        self,
+        caller_text: str,
+        cad_state: dict[str, Any],
+        system_events: list[dict[str, Any]],
+        pending_checkpoints: list[dict[str, Any]] | None = None,
+    ) -> CTDecision:
+        self._pending_updates = {}
+        self._pending_end_call = {}
+        self._pending_checkpoint_decisions = []
+        self._pending_checkpoints = list(pending_checkpoints or [])
+        try:
+            if self._pending_checkpoints and self.checkpoint_strategy in {"auto_approve", "auto-deny", "auto_deny"}:
+                auto_decision = "approved" if self.checkpoint_strategy == "auto_approve" else "denied"
+                checkpoint_decisions = [
+                    {"request_id": str(req.get("request_id", "")), "decision": auto_decision}
+                    for req in self._pending_checkpoints
+                    if str(req.get("request_id", "")).strip()
+                ]
+                return CTDecision(
+                    text="Please stay on the line while I continue processing your emergency.",
+                    cad_updates={},
+                    checkpoint_decisions=checkpoint_decisions,
+                )
+
+            tools = self._tool_specs()
+            user_payload = {
+                "caller_text": caller_text,
+                "cad_state": cad_state,
+                "system_events": system_events[-5:],
+                "incident_type": self.incident_json.get("type"),
+                "pending_checkpoints": self._pending_checkpoints,
+            }
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": json.dumps(user_payload)},
+            ]
+
+            for _ in range(max(1, self.max_tool_rounds)):
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=self.temperature,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    max_completion_tokens=self.max_completion_tokens,
+                )
+                msg = resp.choices[0].message
+                tool_calls = list(getattr(msg, "tool_calls", []) or [])
+                if tool_calls:
+                    assistant_tool_msg: dict[str, Any] = {
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [],
+                    }
+                    for tc in tool_calls:
+                        tname = str(getattr(getattr(tc, "function", None), "name", "") or "")
+                        targs_raw = str(getattr(getattr(tc, "function", None), "arguments", "") or "{}")
+                        tc_id = str(getattr(tc, "id", "") or "")
+                        assistant_tool_msg["tool_calls"].append(
+                            {
+                                "id": tc_id,
+                                "type": "function",
+                                "function": {"name": tname, "arguments": targs_raw},
+                            }
+                        )
+                    messages.append(assistant_tool_msg)
+
+                    for tc in tool_calls:
+                        tname = str(getattr(getattr(tc, "function", None), "name", "") or "")
+                        targs_raw = str(getattr(getattr(tc, "function", None), "arguments", "") or "{}")
+                        tc_id = str(getattr(tc, "id", "") or "")
+                        try:
+                            targs = json.loads(targs_raw) if targs_raw else {}
+                            if not isinstance(targs, dict):
+                                targs = {}
+                        except Exception:
+                            targs = {}
+                        result = self._exec_tool(
+                            tool_name=tname,
+                            args=targs,
+                            cad_state=cad_state,
+                            system_events=system_events,
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": json.dumps(result),
+                            }
+                        )
+                    continue
+
+                parsed = self._parse_ct_json(msg.content or "")
+                cad_updates = parsed.get("cad_updates") if isinstance(parsed.get("cad_updates"), dict) else {}
+                merged_updates = dict(self._pending_updates)
+                merged_updates.update(cad_updates)
+                parsed_checkpoint_decisions = (
+                    parsed.get("checkpoint_decisions")
+                    if isinstance(parsed.get("checkpoint_decisions"), list)
+                    else []
+                )
+                merged_checkpoint_decisions = list(self._pending_checkpoint_decisions)
+                merged_checkpoint_decisions.extend(parsed_checkpoint_decisions)
+                end_call = bool(parsed.get("end_call", False) or self._pending_end_call.get("end_call", False))
+                end_reason = parsed.get("end_reason") if parsed.get("end_reason") else self._pending_end_call.get("end_reason")
+                end_reason_detail = (
+                    parsed.get("end_reason_detail")
+                    if parsed.get("end_reason_detail")
+                    else self._pending_end_call.get("end_reason_detail")
+                )
+                return CTDecision(
+                    text=str(parsed.get("text", "") or "Acknowledged."),
+                    cad_updates=merged_updates,
+                    end_call=end_call,
+                    end_reason=str(end_reason) if end_reason else None,
+                    end_reason_detail=str(end_reason_detail) if end_reason_detail else None,
+                    checkpoint_decisions=[d for d in merged_checkpoint_decisions if isinstance(d, dict)],
+                )
+            return self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+        except Exception:
+            return self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+
+    def _parse_ct_json(self, raw: str) -> dict[str, Any]:
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        try:
+            obj = json.loads(text)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if not m:
+                return {"text": text, "cad_updates": {}, "end_call": False}
+            try:
+                obj = json.loads(m.group(0))
+                return obj if isinstance(obj, dict) else {}
+            except Exception:
+                return {"text": text, "cad_updates": {}, "end_call": False}
+
+    def _tool_specs(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_sop",
+                    "description": "Read SOP snippets by incident_type and step.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "incident_type": {"type": "string"},
+                            "step": {"type": "string"},
+                        },
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_cad_state",
+                    "description": "Read the current CAD state snapshot.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_qa_template",
+                    "description": "Read QA template sections/items.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"section": {"type": "string"}},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_cad",
+                    "description": "Queue CAD field updates to apply this turn.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"updates": {"type": "object"}},
+                        "required": ["updates"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "end_call",
+                    "description": "Flag call termination.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string"},
+                            "reason_detail": {"type": "string"},
+                        },
+                        "required": ["reason"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_checkpoints",
+                    "description": "List pending checkpoint requests for the call-taker role.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_checkpoint",
+                    "description": "Queue a checkpoint decision for submission.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {"type": "string"},
+                            "decision": {"type": "string"},
+                            "edited_payload": {"type": "object"},
+                            "rationale": {"type": "string"},
+                            "re_escalate_to": {"type": "string"},
+                        },
+                        "required": ["request_id", "decision"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+        if self.enable_map_tool:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "view_map",
+                        "description": "Inspect approximate map/location context for the incident.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                            },
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            )
+        return tools
+
+    def _exec_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cad_state: dict[str, Any],
+        system_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if tool_name == "read_sop":
+            incident_type = str(args.get("incident_type") or self.incident_json.get("type", "Fire")).title()
+            step = str(args.get("step", "initial")).lower()
+            return {"snippets": self._sop_snippets(incident_type, step)}
+        if tool_name == "read_cad_state":
+            return {"cad_state": cad_state, "system_events_recent": system_events[-5:]}
+        if tool_name == "read_qa_template":
+            section = str(args.get("section", "")).strip().upper()
+            templates = self.qa_template_json.get("templates", {})
+            if section and isinstance(templates, dict):
+                return {"section": section, "template": templates.get(section)}
+            return {"templates": templates}
+        if tool_name == "view_map":
+            loc = self.incident_json.get("location", {}) if isinstance(self.incident_json.get("location"), dict) else {}
+            return {
+                "query": str(args.get("query", "")),
+                "location": {
+                    "address_line": loc.get("address_line"),
+                    "city": loc.get("city"),
+                    "lat": loc.get("lat"),
+                    "lon": loc.get("lon"),
+                    "accuracy_m": loc.get("accuracy_m"),
+                },
+            }
+        if tool_name == "write_cad":
+            updates = args.get("updates") if isinstance(args.get("updates"), dict) else {}
+            self._pending_updates.update(updates)
+            return {"queued_updates": updates}
+        if tool_name == "end_call":
+            reason = str(args.get("reason", "")).strip() or "other"
+            detail = str(args.get("reason_detail", "")).strip() or None
+            self._pending_end_call = {"end_call": True, "end_reason": reason, "end_reason_detail": detail}
+            return {"queued_end_call": self._pending_end_call}
+        if tool_name == "list_checkpoints":
+            return {"pending_checkpoints": self._pending_checkpoints}
+        if tool_name == "submit_checkpoint":
+            req_id = str(args.get("request_id", "")).strip()
+            decision = str(args.get("decision", "")).strip()
+            if not req_id or not decision:
+                return {"error": "request_id_and_decision_required"}
+            decision_obj: dict[str, Any] = {"request_id": req_id, "decision": decision}
+            if isinstance(args.get("edited_payload"), dict):
+                decision_obj["edited_payload"] = args["edited_payload"]
+            if args.get("rationale"):
+                decision_obj["rationale"] = str(args["rationale"])
+            if args.get("re_escalate_to"):
+                decision_obj["re_escalate_to"] = str(args["re_escalate_to"])
+            self._pending_checkpoint_decisions.append(decision_obj)
+            return {"queued_checkpoint_decision": decision_obj}
+        return {"error": f"unknown_tool:{tool_name}"}
+
+    def _sop_snippets(self, incident_type: str, step: str) -> list[dict[str, str]]:
+        by_type = {
+            "Fire": [
+                {"step": "initial", "title": "Fire Initial Triage", "text": "Confirm exact location, occupants, flame/smoke conditions, hazards."},
+                {"step": "dispatch", "title": "Fire Dispatch Guidance", "text": "Dispatch immediately if active fire is confirmed; maintain line safety guidance."},
+            ],
+            "Police": [
+                {"step": "initial", "title": "Police Initial Triage", "text": "Assess immediate threat, weapons, suspect description, scene safety."},
+                {"step": "dispatch", "title": "Police Dispatch Guidance", "text": "Prioritize active violence and officer safety information."},
+            ],
+            "Ems": [
+                {"step": "initial", "title": "EMS Initial Triage", "text": "Assess consciousness, breathing, bleeding, patient age/condition."},
+                {"step": "dispatch", "title": "EMS Dispatch Guidance", "text": "Dispatch for life threats; provide immediate pre-arrival instructions."},
+            ],
+        }
+        snippets = by_type.get(incident_type.title(), [])
+        if step == "all":
+            return snippets
+        return [row for row in snippets if row.get("step") == step] or snippets[:1]
 
 
 class OpenAIQAEvaluatorAgent:
@@ -480,6 +876,22 @@ def _create_openai_calltaker(profile: AgentProfile, incident_json: dict[str, Any
         model=profile.model,
         temperature=profile.temperature,
         incident_json=incident_json,
+        agent_config=agent_config,
+    )
+
+
+def _create_openai_synthetic_calltaker(
+    profile: AgentProfile,
+    incident_json: dict[str, Any],
+    *,
+    qa_template_json: dict[str, Any],
+    agent_config: dict[str, Any],
+) -> OpenAISyntheticCallTakerAgent:
+    return OpenAISyntheticCallTakerAgent(
+        model=profile.model,
+        temperature=profile.temperature,
+        incident_json=incident_json,
+        qa_template_json=qa_template_json,
         agent_config=agent_config,
     )
 
