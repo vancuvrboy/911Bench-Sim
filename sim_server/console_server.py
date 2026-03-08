@@ -58,6 +58,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def app(self) -> ConsoleState:
         return self.server.app_state  # type: ignore[attr-defined]
 
+    def handle(self) -> None:  # noqa: D401
+        # EventSource clients may disconnect during long-lived SSE reads.
+        # Treat connection resets as normal teardown instead of noisy traceback.
+        try:
+            super().handle()
+        except ConnectionResetError:
+            return
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
@@ -190,13 +198,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             cad_updates = payload.get("cad_updates", {})
             if not isinstance(cad_updates, dict):
                 cad_updates = {}
+            call_taker_text = str(payload.get("text", ""))
+            # Prime caller against the current manual call-taker utterance so
+            # caller/call-taker remain interleaved on the same turn.
+            self._prime_caller_for_manual_calltaker(incident_id, call_taker_text=call_taker_text)
             out = self.app.engine.calltaker_post_turn(
                 incident_id=incident_id,
-                text=str(payload.get("text", "")),
+                text=call_taker_text,
                 cad_updates=cad_updates,
             )
-            # Prime the next caller utterance using the just-posted call-taker turn.
-            self._prime_caller_for_manual_calltaker(incident_id)
             self._send_json(out)
             return
         if path == "/api/end_call":
@@ -460,7 +470,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return ""
         return str(turns[-1].get("caller", ""))
 
-    def _prime_caller_for_manual_calltaker(self, incident_id: str) -> None:
+    def _prime_caller_for_manual_calltaker(self, incident_id: str, call_taker_text: str | None = None) -> None:
         if not is_manual("calltaker", self.app.calltaker_agent_id):
             return
         if is_manual("caller", self.app.caller_agent_id):
@@ -480,8 +490,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         else:
             if not self.app.caller_agent:
                 return
-            last_ct = self._latest_calltaker_text(incident_id)
-            caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=last_ct, system_events=system_events)
+            ct_input = str(call_taker_text or "").strip() or self._latest_calltaker_text(incident_id)
+            caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=ct_input, system_events=system_events)
         self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
 
     def _load_replay_for_console(self, scenario_id: str, incident_seed: dict[str, Any]) -> list[dict[str, Any]] | None:
