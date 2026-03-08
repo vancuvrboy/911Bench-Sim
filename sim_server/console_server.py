@@ -106,7 +106,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({"status": "ok"})
             return
         if path == "/api/agent/catalog":
-            self._send_json({"profiles": list_profiles()})
+            self._send_json({"profiles": list_profiles(config_root=self.app.agent_config_root)})
             return
         if path == "/api/state":
             self._send_json(self._state_payload())
@@ -418,10 +418,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
             events = self.app.engine.episode_events(incident_id)
             system_events = [ev for ev in events[-30:] if ev.get("event_type") == "system"]
-            caller_manual = is_manual("caller", self.app.caller_agent_id)
-            calltaker_manual = is_manual("calltaker", self.app.calltaker_agent_id)
-            caller_replay = is_replay("caller", self.app.caller_agent_id)
-            calltaker_replay = is_replay("calltaker", self.app.calltaker_agent_id)
+            caller_manual = is_manual("caller", self.app.caller_agent_id, config_root=self.app.agent_config_root)
+            calltaker_manual = is_manual("calltaker", self.app.calltaker_agent_id, config_root=self.app.agent_config_root)
+            caller_replay = is_replay("caller", self.app.caller_agent_id, config_root=self.app.agent_config_root)
+            calltaker_replay = is_replay("calltaker", self.app.calltaker_agent_id, config_root=self.app.agent_config_root)
 
             if caller_manual and calltaker_manual:
                 raise SimError("agent_mode_invalid", "auto_step requires at least one callable or replay agent")
@@ -506,7 +506,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _api_qa_evaluate(self) -> dict[str, Any]:
         incident_id = self._incident_or_400()
-        if is_manual("qa", self.app.qa_agent_id) or self.app.qa_agent is None:
+        if is_manual("qa", self.app.qa_agent_id, config_root=self.app.agent_config_root) or self.app.qa_agent is None:
             raise SimError("qa_mode_invalid", "qa agent profile is manual; cannot evaluate")
 
         events = self.app.engine.episode_events(incident_id)
@@ -741,16 +741,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return str(turns[-1].get("caller", ""))
 
     def _prime_caller_for_manual_calltaker(self, incident_id: str, call_taker_text: str | None = None) -> None:
-        if not is_manual("calltaker", self.app.calltaker_agent_id):
+        if not is_manual("calltaker", self.app.calltaker_agent_id, config_root=self.app.agent_config_root):
             return
-        if is_manual("caller", self.app.caller_agent_id):
+        if is_manual("caller", self.app.caller_agent_id, config_root=self.app.agent_config_root):
             return
         ep = self.app.engine._get_episode(incident_id)  # type: ignore[attr-defined]
         if str(getattr(ep, "pending_caller_text", "") or "").strip():
             return
         events = self.app.engine.episode_events(incident_id)
         system_events = [ev for ev in events[-30:] if ev.get("event_type") == "system"]
-        if is_replay("caller", self.app.caller_agent_id):
+        if is_replay("caller", self.app.caller_agent_id, config_root=self.app.agent_config_root):
             if not self.app.replay_steps or self.app.replay_idx >= len(self.app.replay_steps):
                 return
             step = self.app.replay_steps[self.app.replay_idx]

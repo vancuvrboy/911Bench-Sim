@@ -25,7 +25,7 @@ class AgentProfile:
     mode: str
 
 
-_CATALOG: list[AgentProfile] = [
+_BUILTIN_CATALOG: list[AgentProfile] = [
     AgentProfile(
         id="manual",
         role="caller",
@@ -52,15 +52,6 @@ _CATALOG: list[AgentProfile] = [
         temperature=0.0,
         description="Replay pre-recorded caller outputs",
         mode="replay",
-    ),
-    AgentProfile(
-        id="openai_gpt4o_mini_v1",
-        role="caller",
-        provider="openai",
-        model="gpt-4o-mini",
-        temperature=0.3,
-        description="OpenAI caller adapter (Responses API)",
-        mode="callable",
     ),
     AgentProfile(
         id="manual",
@@ -90,24 +81,6 @@ _CATALOG: list[AgentProfile] = [
         mode="replay",
     ),
     AgentProfile(
-        id="openai_gpt4o_mini_v1",
-        role="calltaker",
-        provider="openai",
-        model="gpt-4o-mini",
-        temperature=0.0,
-        description="OpenAI call-taker adapter (JSON action output)",
-        mode="callable",
-    ),
-    AgentProfile(
-        id="openai_synthetic_v1",
-        role="calltaker",
-        provider="openai",
-        model="gpt-4o-mini",
-        temperature=0.1,
-        description="OpenAI synthetic call-taker with tool loop",
-        mode="callable",
-    ),
-    AgentProfile(
         id="manual",
         role="qa",
         provider="builtin",
@@ -134,35 +107,148 @@ _CATALOG: list[AgentProfile] = [
         description="Replay QA score fixture if available",
         mode="replay",
     ),
-    AgentProfile(
-        id="openai_gpt4o_mini_v1",
-        role="qa",
-        provider="openai",
-        model="gpt-4o-mini",
-        temperature=0.0,
-        description="OpenAI QA adapter (JSON rubric scoring)",
-        mode="callable",
-    ),
 ]
 
 
-def list_profiles() -> list[dict[str, Any]]:
-    return [asdict(p) for p in _CATALOG]
+def _default_config_root() -> Path:
+    return (Path(__file__).resolve().parent / "config").resolve()
 
 
-def get_profile(role: str, agent_id: str) -> AgentProfile:
-    for p in _CATALOG:
+def _yaml_load(path: Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return _minimal_yaml_load(path)
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return _minimal_yaml_load(path)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _parse_scalar(value: str) -> Any:
+    v = value.strip()
+    if not v:
+        return ""
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        return v[1:-1]
+    low = v.lower()
+    if low in {"true", "false"}:
+        return low == "true"
+    if low in {"null", "none"}:
+        return None
+    try:
+        if "." in v:
+            return float(v)
+        return int(v)
+    except Exception:
+        return v
+
+
+def _minimal_yaml_load(path: Path) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return out
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        if line.startswith(" ") or ":" not in line:
+            i += 1
+            continue
+        key, rest = line.split(":", 1)
+        key = key.strip()
+        rest = rest.strip()
+        if rest == "|":
+            i += 1
+            block: list[str] = []
+            while i < n:
+                nxt = lines[i]
+                if not nxt:
+                    block.append("")
+                    i += 1
+                    continue
+                if not nxt.startswith(" "):
+                    break
+                block.append(nxt[2:] if nxt.startswith("  ") else nxt.lstrip())
+                i += 1
+            out[key] = "\n".join(block).rstrip()
+            continue
+        out[key] = _parse_scalar(rest)
+        i += 1
+    return out
+
+
+def _load_external_profiles(config_root: str | Path | None) -> list[AgentProfile]:
+    base = Path(config_root).resolve() if config_root is not None else _default_config_root()
+    if not base.exists() or not base.is_dir():
+        return []
+    out: list[AgentProfile] = []
+    for path in sorted(base.glob("*.yaml")):
+        stem = path.stem
+        if "." not in stem:
+            continue
+        role_from_name, id_from_name = stem.split(".", 1)
+        if role_from_name not in {"caller", "calltaker", "qa"}:
+            continue
+        cfg = _yaml_load(path)
+        role = str(cfg.get("role", role_from_name))
+        if role not in {"caller", "calltaker", "qa"}:
+            continue
+        profile_id = str(cfg.get("id", id_from_name))
+        provider = str(cfg.get("provider", "openai"))
+        mode = str(cfg.get("mode", "callable"))
+        model = str(cfg.get("model", "-"))
+        try:
+            temperature = float(cfg.get("temperature", 0.0))
+        except Exception:
+            temperature = 0.0
+        description = str(cfg.get("description", f"Configured {role} profile"))
+        out.append(
+            AgentProfile(
+                id=profile_id,
+                role=role,
+                provider=provider,
+                model=model,
+                temperature=temperature,
+                description=description,
+                mode=mode,
+            )
+        )
+    return out
+
+
+def _build_catalog(config_root: str | Path | None = None) -> list[AgentProfile]:
+    by_key: dict[tuple[str, str], AgentProfile] = {(p.role, p.id): p for p in _BUILTIN_CATALOG}
+    for p in _load_external_profiles(config_root):
+        by_key[(p.role, p.id)] = p
+    # Keep stable ordering by role then id for UI.
+    return sorted(by_key.values(), key=lambda p: (p.role, p.id))
+
+
+def list_profiles(*, config_root: str | Path | None = None) -> list[dict[str, Any]]:
+    return [asdict(p) for p in _build_catalog(config_root=config_root)]
+
+
+def get_profile(role: str, agent_id: str, *, config_root: str | Path | None = None) -> AgentProfile:
+    for p in _build_catalog(config_root=config_root):
         if p.role == role and p.id == agent_id:
             return p
     raise ValueError(f"unknown agent profile: role={role}, id={agent_id}")
 
 
-def is_replay(role: str, agent_id: str) -> bool:
-    return get_profile(role, agent_id).mode == "replay"
+def is_replay(role: str, agent_id: str, *, config_root: str | Path | None = None) -> bool:
+    return get_profile(role, agent_id, config_root=config_root).mode == "replay"
 
 
-def is_manual(role: str, agent_id: str) -> bool:
-    return get_profile(role, agent_id).mode == "manual"
+def is_manual(role: str, agent_id: str, *, config_root: str | Path | None = None) -> bool:
+    return get_profile(role, agent_id, config_root=config_root).mode == "manual"
 
 
 def create_caller_agent(
@@ -172,13 +258,16 @@ def create_caller_agent(
     *,
     config_root: str | Path | None = None,
 ) -> CallerAgent | Any | None:
-    profile = get_profile("caller", agent_id)
+    profile = get_profile("caller", agent_id, config_root=config_root)
     if profile.mode in {"manual", "replay"}:
         return None
     if profile.provider == "builtin":
         return CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=profile.temperature)
     cfg = _load_agent_config(config_root=config_root, role="caller", agent_id=agent_id)
-    return _create_openai_caller(profile, caller_json, incident_json, agent_config=cfg)
+    adapter = str(cfg.get("adapter", "openai_caller_responses")).strip().lower()
+    if adapter in {"openai_caller_responses", "openai_responses"}:
+        return _create_openai_caller(profile, caller_json, incident_json, agent_config=cfg)
+    raise ValueError(f"unsupported caller adapter: {adapter}")
 
 
 def create_calltaker_agent(
@@ -189,20 +278,25 @@ def create_calltaker_agent(
     config_root: str | Path | None = None,
     **kwargs: Any,
 ) -> CallTakerAgent | Any | None:
-    profile = get_profile("calltaker", agent_id)
+    profile = get_profile("calltaker", agent_id, config_root=config_root)
     if profile.mode in {"manual", "replay"}:
         return None
     if profile.provider == "builtin":
         return CallTakerAgent(incident_json=incident_json, temperature=profile.temperature, **kwargs)
     cfg = _load_agent_config(config_root=config_root, role="calltaker", agent_id=agent_id)
-    if profile.id == "openai_synthetic_v1":
+    adapter = str(cfg.get("adapter", "")).strip().lower()
+    if not adapter:
+        adapter = "openai_calltaker_synthetic" if "synthetic" in profile.id else "openai_calltaker_json"
+    if adapter in {"openai_calltaker_synthetic", "openai_synthetic"}:
         return _create_openai_synthetic_calltaker(
             profile,
             incident_json,
             qa_template_json=qa_template_json or {},
             agent_config=cfg,
         )
-    return _create_openai_calltaker(profile, incident_json, agent_config=cfg)
+    if adapter in {"openai_calltaker_json", "openai_chat_json"}:
+        return _create_openai_calltaker(profile, incident_json, agent_config=cfg)
+    raise ValueError(f"unsupported calltaker adapter: {adapter}")
 
 
 def create_qa_agent(
@@ -212,28 +306,24 @@ def create_qa_agent(
     config_root: str | Path | None = None,
     **kwargs: Any,
 ) -> QAEvaluatorAgent | Any | None:
-    profile = get_profile("qa", agent_id)
+    profile = get_profile("qa", agent_id, config_root=config_root)
     if profile.mode in {"manual", "replay"}:
         return None
     if profile.provider == "builtin":
         return QAEvaluatorAgent(qa_template_json=qa_template_json, temperature=profile.temperature, **kwargs)
     cfg = _load_agent_config(config_root=config_root, role="qa", agent_id=agent_id)
-    return _create_openai_qa(profile, qa_template_json, agent_config=cfg)
+    adapter = str(cfg.get("adapter", "openai_qa_json")).strip().lower()
+    if adapter in {"openai_qa_json", "openai_chat_json"}:
+        return _create_openai_qa(profile, qa_template_json, agent_config=cfg)
+    raise ValueError(f"unsupported qa adapter: {adapter}")
 
 
 def _load_agent_config(config_root: str | Path | None, role: str, agent_id: str) -> dict[str, Any]:
-    if config_root is None:
-        return {}
-    base = Path(config_root)
+    base = Path(config_root).resolve() if config_root is not None else _default_config_root()
     path = base / f"{role}.{agent_id}.yaml"
     if not path.exists():
         return {}
-    try:
-        import yaml  # type: ignore
-    except Exception:
-        return {}
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return raw if isinstance(raw, dict) else {}
+    return _yaml_load(path)
 
 
 def _create_openai_client() -> Any:

@@ -1,3 +1,9 @@
+id: openai_gpt4o_mini_v1
+role: calltaker
+provider: openai
+mode: callable
+adapter: openai_calltaker_json
+description: OpenAI call-taker adapter (JSON action output)
 model: gpt-4o-mini
 temperature: 0.0
 system_prompt: |
