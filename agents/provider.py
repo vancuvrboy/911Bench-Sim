@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from agents.caller_agent import CallerAgent
@@ -57,7 +58,7 @@ _CATALOG: list[AgentProfile] = [
         provider="openai",
         model="gpt-4o-mini",
         temperature=0.3,
-        description="OpenAI caller adapter (text output)",
+        description="OpenAI caller adapter (Responses API)",
         mode="callable",
     ),
     AgentProfile(
@@ -191,32 +192,88 @@ def _create_openai_client() -> Any:
     return OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
+def _read_prompt_from_env() -> str:
+    prompt_file = str(os.environ.get("OPENAI_CALLER_SYSTEM_PROMPT_FILE", "")).strip()
+    if prompt_file:
+        path = Path(prompt_file).expanduser()
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    inline_prompt = str(os.environ.get("OPENAI_CALLER_SYSTEM_PROMPT", "")).strip()
+    if inline_prompt:
+        return inline_prompt
+    return (
+        "You are role-playing a 911 caller in a training simulator. "
+        "Speak naturally as a stressed but cooperative caller. "
+        "Only output the caller utterance text, no JSON, no labels, no analysis. "
+        "Keep responses concise (1-3 sentences)."
+    )
+
+
 class OpenAICallerAgent:
     def __init__(self, model: str, temperature: float, caller_json: dict[str, Any], incident_json: dict[str, Any]) -> None:
         self.client = _create_openai_client()
-        self.model = model
-        self.temperature = temperature
+        self.model = str(os.environ.get("OPENAI_CALLER_MODEL", model)).strip() or model
+        self.temperature = float(os.environ.get("OPENAI_CALLER_TEMPERATURE", str(temperature)))
         self.caller_json = caller_json
         self.incident_json = incident_json
+        self.system_prompt = _read_prompt_from_env()
         self._fallback = CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=temperature)
+
+    def _user_prompt(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> str:
+        profile_id = str(self.caller_json.get("profile_id", "CALLER-UNKNOWN"))
+        incident_type = str(self.incident_json.get("type", "Unknown"))
+        opening = str((self.incident_json.get("caller_view", {}) or {}).get("initial_opening_line", "I need help."))
+        return (
+            f"caller_profile_id={profile_id}\n"
+            f"incident_type={incident_type}\n"
+            f"opening_line_hint={opening}\n"
+            f"latest_call_taker_text={call_taker_text}\n"
+            f"recent_system_events={json.dumps(system_events[-4:])}\n"
+            "Generate the next caller utterance now."
+        )
+
+    def _extract_text(self, resp: Any) -> str:
+        output_text = str(getattr(resp, "output_text", "") or "").strip()
+        if output_text:
+            return output_text
+        output = getattr(resp, "output", None)
+        if isinstance(output, list):
+            chunks: list[str] = []
+            for item in output:
+                content = getattr(item, "content", None)
+                if isinstance(content, list):
+                    for part in content:
+                        txt = str(getattr(part, "text", "") or "").strip()
+                        if txt:
+                            chunks.append(txt)
+            joined = "\n".join(chunks).strip()
+            if joined:
+                return joined
+        return ""
 
     def next_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
         try:
-            prompt = (
-                "You are a 911 caller. Return plain text utterance only.\n"
-                f"Call-taker says: {call_taker_text}\n"
-                f"System events: {json.dumps(system_events[-3:])}\n"
-                "Keep it concise and realistic."
-            )
-            resp = self.client.chat.completions.create(
+            resp = self.client.responses.create(
                 model=self.model,
                 temperature=self.temperature,
-                messages=[{"role": "user", "content": prompt}],
+                input=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": self._user_prompt(call_taker_text, system_events)},
+                ],
             )
-            text = (resp.choices[0].message.content or "").strip()
+            text = self._extract_text(resp)
             if not text:
-                raise ValueError("empty_openai_caller_output")
-            _, meta = self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
+                raise ValueError("empty_openai_responses_output")
+            _, fallback_meta = self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
+            meta = dict(fallback_meta)
+            meta.update(
+                {
+                    "model_provider": "openai",
+                    "model": self.model,
+                    "api": "responses",
+                    "response_id": str(getattr(resp, "id", "")),
+                }
+            )
             return text, meta
         except Exception:
             return self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
@@ -297,4 +354,3 @@ def _create_openai_calltaker(profile: AgentProfile, incident_json: dict[str, Any
 
 def _create_openai_qa(profile: AgentProfile, qa_template_json: dict[str, Any]) -> OpenAIQAEvaluatorAgent:
     return OpenAIQAEvaluatorAgent(model=profile.model, temperature=profile.temperature, qa_template_json=qa_template_json)
-

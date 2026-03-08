@@ -62,3 +62,25 @@ Supported profile IDs include:
 - `deterministic_v1`
 - `replay`
 - `openai_gpt4o_mini_v1` (requires `OPENAI_API_KEY` and `openai` package)
+
+### OpenAI Caller (Responses API) quick setup
+
+Use profile `openai_gpt4o_mini_v1` for `caller` and `manual` for `calltaker` in the web console.
+
+Required:
+
+```bash
+export OPENAI_API_KEY="<your_key>"
+```
+
+Optional caller tuning:
+
+```bash
+export OPENAI_CALLER_MODEL="gpt-4o-mini"
+export OPENAI_CALLER_TEMPERATURE="0.3"
+export OPENAI_CALLER_SYSTEM_PROMPT_FILE="/absolute/path/to/caller_system_prompt.txt"
+# or inline prompt:
+export OPENAI_CALLER_SYSTEM_PROMPT="You are a 911 caller ..."
+```
+
+The caller adapter uses OpenAI `responses.create(...)` and falls back to deterministic caller behavior if generation fails.
