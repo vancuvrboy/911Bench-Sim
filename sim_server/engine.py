@@ -507,6 +507,11 @@ class SimulationEngine:
         }
         if qa_score is not None:
             meta["artifact_hashes"]["qa_score.json.sha256"] = _hash_obj(qa_score)
+            if isinstance(qa_score, dict):
+                meta["qa_summary"] = {
+                    "normalized_score": qa_score.get("normalized_score"),
+                    "incident_type": qa_score.get("incident_type"),
+                }
         if extra_meta:
             meta.update(extra_meta)
 

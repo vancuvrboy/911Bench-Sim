@@ -104,6 +104,13 @@ Each episode folder contains:
 
 `episode_id` is auto-derived as `<incident_id>__<sealed_timestamp>`.
 
+Run-level files under `runs/<run_id>/`:
+
+- `run_manifest.json` (run identity + creation metadata)
+- `batch_config.json` (runtime profile/config snapshot for reproducibility)
+- `index.json` (episode index for machine processing)
+- `index.csv` (episode index for quick analysis tooling)
+
 Notes:
 - `run_id` groups many episodes for batch/headless execution.
 - auto-save on episode seal is enabled by default.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import mimetypes
 import time
@@ -528,6 +529,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _save_current_episode_artifacts(self, incident_id: str, reason: str) -> dict[str, Any]:
         if self.app.artifacts_root is None:
             raise SimError("artifacts_root_unset", "artifact root is not configured")
+        self._ensure_run_documents()
         saved = self.app.engine.save_artifact_bundle(
             incident_id=incident_id,
             output_root=self.app.artifacts_root,
@@ -538,6 +540,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if self.app.saved_artifacts is None:
             self.app.saved_artifacts = []
         self.app.saved_artifacts.append(saved)
+        self._rebuild_run_index()
         return saved
 
     def _maybe_autosave_sealed(self, incident_id: str, reason: str) -> None:
@@ -559,6 +562,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         run_id = str(payload.get("run_id", "")).strip() or self.app.run_id
         root = self.app.artifacts_root or (self.app.root / "runs")
         run_root = root / run_id
+        self._ensure_run_documents(run_root=run_root, run_id=run_id)
+        self._rebuild_run_index(run_root=run_root)
         rows: list[dict[str, Any]] = []
         if run_root.exists():
             for meta_path in sorted(run_root.rglob("meta.json")):
@@ -575,6 +580,78 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     }
                 )
         return {"run_id": run_id, "root": str(run_root), "episodes": rows}
+
+    def _ensure_run_documents(self, run_root: Path | None = None, run_id: str | None = None) -> None:
+        root = run_root or ((self.app.artifacts_root or (self.app.root / "runs")) / (run_id or self.app.run_id))
+        resolved_run_id = run_id or self.app.run_id
+        root.mkdir(parents=True, exist_ok=True)
+
+        manifest_path = root / "run_manifest.json"
+        if not manifest_path.exists():
+            manifest = {
+                "run_id": resolved_run_id,
+                "created_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "created_by": "sim_server.console_server",
+                "root": str(root),
+            }
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+        batch_config_path = root / "batch_config.json"
+        if not batch_config_path.exists():
+            config = {
+                "run_id": resolved_run_id,
+                "artifacts_root": str(self.app.artifacts_root or (self.app.root / "runs")),
+                "auto_save_on_end": bool(self.app.auto_save_on_end),
+                "agent_profiles": {
+                    "caller": self.app.caller_agent_id,
+                    "calltaker": self.app.calltaker_agent_id,
+                    "qa": self.app.qa_agent_id,
+                },
+                "agent_config_manifest": self._agent_config_manifest(),
+            }
+            batch_config_path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _rebuild_run_index(self, run_root: Path | None = None) -> None:
+        root = run_root or ((self.app.artifacts_root or (self.app.root / "runs")) / self.app.run_id)
+        if not root.exists():
+            return
+
+        rows: list[dict[str, Any]] = []
+        for meta_path in sorted(root.rglob("meta.json")):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            qa_score_value: float | None = None
+            qa_path = meta_path.parent / "qa_score.json"
+            if qa_path.exists():
+                try:
+                    qa_obj = json.loads(qa_path.read_text(encoding="utf-8"))
+                    if isinstance(qa_obj, dict) and qa_obj.get("normalized_score") is not None:
+                        qa_score_value = float(qa_obj.get("normalized_score"))
+                except Exception:
+                    qa_score_value = None
+            rows.append(
+                {
+                    "episode_dir": str(meta_path.parent),
+                    "scenario_id": str(meta.get("scenario_id", "")),
+                    "incident_id": str(meta.get("incident_id", "")),
+                    "end_ts": str(meta.get("end_ts", "")),
+                    "total_turns": int(meta.get("total_turns", 0) or 0),
+                    "total_events": int(meta.get("total_events", 0) or 0),
+                    "qa_score": qa_score_value,
+                }
+            )
+
+        (root / "index.json").write_text(json.dumps({"episodes": rows}, indent=2, sort_keys=True), encoding="utf-8")
+        with (root / "index.csv").open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=["episode_dir", "scenario_id", "incident_id", "end_ts", "total_turns", "total_events", "qa_score"],
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
 
     def _latest_calltaker_text(self, incident_id: str) -> str:
         turns = self.app.engine.plant_get_transcript_since(incident_id, 0).get("turns", [])
