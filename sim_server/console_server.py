@@ -129,12 +129,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             cad_updates = payload.get("cad_updates", {})
             if not isinstance(cad_updates, dict):
                 cad_updates = {}
-            self._prime_caller_for_manual_calltaker(incident_id)
             out = self.app.engine.calltaker_post_turn(
                 incident_id=incident_id,
                 text=str(payload.get("text", "")),
                 cad_updates=cad_updates,
             )
+            # Prime the next caller utterance using the just-posted call-taker turn.
+            self._prime_caller_for_manual_calltaker(incident_id)
             self._send_json(out)
             return
         if path == "/api/end_call":
