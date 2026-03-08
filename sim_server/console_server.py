@@ -6,6 +6,7 @@ import argparse
 import json
 import mimetypes
 import time
+import uuid
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -244,7 +245,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _api_load_start(self, payload: dict[str, Any]) -> None:
         root = self.app.root
-        scenario_id = str(payload.get("scenario_id", "ui_session"))
+        requested_scenario = str(payload.get("scenario_id", "")).strip()
+        scenario_id = requested_scenario or f"scenario_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         caller_fixture = str(payload.get("caller_fixture", "fixtures/caller_cooperative_calm.json"))
         incident_fixture = str(payload.get("incident_fixture", "fixtures/incident_fire_residential.json"))
         qa_fixture = str(payload.get("qa_fixture", "fixtures/qaTemplate_003.json"))
@@ -296,7 +298,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.app.replay_steps = self._load_replay_for_console(scenario_id, incident)
         self.app.replay_idx = 0
         self.app.last_qa_score = None
-        self._send_json({"loaded": loaded, "started": started})
+        self._send_json(
+            {
+                "loaded": loaded,
+                "started": started,
+                "scenario_id": scenario_id,
+                "scenario_id_generated": bool(not requested_scenario),
+            }
+        )
 
     def _incident_or_400(self) -> str:
         if not self.app.incident_id:

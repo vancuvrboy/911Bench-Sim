@@ -223,7 +223,9 @@ async function setupEpisode() {
       max_turns: Number($("maxTurns").value || 20),
     };
     const out = await api.post("/api/admin/load_start", body);
-    $("setupStatus").textContent = `Loaded ${out.loaded.incident_id} and started episode`;
+    if (out.scenario_id) $("scenarioId").value = out.scenario_id;
+    const generatedNote = out.scenario_id_generated ? " (auto-generated scenario_id)" : "";
+    $("setupStatus").textContent = `Loaded ${out.loaded.incident_id} under ${out.scenario_id}${generatedNote} and started episode`;
     await refresh();
     openLiveStream();
     if (callerAgentId === "replay" || calltakerAgentId === "replay" || qaAgentId === "replay") {
