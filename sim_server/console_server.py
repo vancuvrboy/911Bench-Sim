@@ -463,6 +463,57 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     cad_updates = decision.cad_updates
                     end_call = bool(decision.end_call)
                     end_reason = str(decision.end_reason or "other")
+                    if end_call and not self._end_call_allowed(
+                        incident_id=incident_id,
+                        reason=end_reason,
+                        pending_cad_updates=cad_updates,
+                    ):
+                        # Ask the agent to correct itself in the same turn and
+                        # hide the invalid end-call draft from the transcript.
+                        correction_events = list(system_events)
+                        correction_events.append(
+                            {
+                                "event_type": "system",
+                                "subtype": "generic",
+                                "text": (
+                                    "END_CALL_REJECTED: Call cannot end yet. "
+                                    "If dispatch is triggered, end_call is allowed only after responders_arrived."
+                                ),
+                            }
+                        )
+                        for _ in range(2):
+                            decision = self.app.calltaker_agent.next_turn(
+                                caller_text=input_caller_text,
+                                cad_state=snap.get("cad_state", {}),
+                                system_events=correction_events,
+                                pending_checkpoints=pending_checkpoints,
+                            )
+                            calltaker_text = decision.text
+                            cad_updates = decision.cad_updates
+                            end_call = bool(decision.end_call)
+                            end_reason = str(decision.end_reason or "other")
+                            if not end_call or self._end_call_allowed(
+                                incident_id=incident_id,
+                                reason=end_reason,
+                                pending_cad_updates=cad_updates,
+                            ):
+                                break
+                            correction_events.append(
+                                {
+                                    "event_type": "system",
+                                    "subtype": "generic",
+                                    "text": (
+                                        "END_CALL_REJECTED_AGAIN: continue call and gather/monitor information."
+                                    ),
+                                }
+                            )
+                        if end_call and not self._end_call_allowed(
+                            incident_id=incident_id,
+                            reason=end_reason,
+                            pending_cad_updates=cad_updates,
+                        ):
+                            end_call = False
+                            end_reason = "other"
                 if not caller_manual:
                     if not self.app.caller_agent:
                         raise SimError("agent_mode_invalid", "caller profile is not callable")
@@ -508,6 +559,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "last_queued_caller_text": last_queued_caller_text,
             "phase": self.app.engine.plant_get_state_snapshot(incident_id).get("episode_phase"),
         }
+
+    def _end_call_allowed(self, incident_id: str, reason: str, pending_cad_updates: dict[str, Any] | None = None) -> bool:
+        snap = self.app.engine.plant_get_state_snapshot(incident_id)
+        cad_state = snap.get("cad_state", {}) if isinstance(snap.get("cad_state"), dict) else {}
+        updates = pending_cad_updates if isinstance(pending_cad_updates, dict) else {}
+        dispatch_now = bool(updates.get("dispatch_triggered", cad_state.get("dispatch_triggered", False)))
+        events = self.app.engine.episode_events(incident_id)
+        responders_arrived = any(
+            ev.get("event_type") == "system" and ev.get("subtype") == "responders_arrived"
+            for ev in events
+        )
+        rsn = str(reason or "").strip() or "other"
+        if dispatch_now and not responders_arrived and rsn != "responders_arrived":
+            return False
+        if rsn == "responders_arrived" and not responders_arrived:
+            return False
+        return True
 
     def _api_qa_evaluate(self) -> dict[str, Any]:
         incident_id = self._incident_or_400()

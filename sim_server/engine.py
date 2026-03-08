@@ -210,6 +210,15 @@ class SimulationEngine:
 
     def calltaker_end_call(self, incident_id: str, reason: str, reason_detail: str | None = None) -> dict[str, Any]:
         ep = self._get_running_episode(incident_id)
+        reason = str(reason or "").strip() or "other"
+        if ep.dispatch_triggered:
+            if not ep.responders_arrived and reason != "responders_arrived":
+                raise StateError(
+                    "invalid_end_reason",
+                    "dispatch already triggered; cannot end call before responders_arrived",
+                )
+        if reason == "responders_arrived" and not ep.responders_arrived:
+            raise StateError("invalid_end_reason", "responders have not arrived yet")
         if reason == "resolved_no_dispatch" and ep.dispatch_triggered:
             raise StateError("invalid_end_reason", "dispatch already triggered; use responders_arrived path")
         if reason == "caller_disconnected":
