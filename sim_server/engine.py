@@ -164,13 +164,20 @@ class SimulationEngine:
 
         return {"turn": turn, "ts": _iso_now(), "status": "accepted"}
 
-    def calltaker_post_turn(self, incident_id: str, text: str, cad_updates: dict[str, Any] | None = None) -> dict[str, Any]:
+    def calltaker_post_turn(
+        self,
+        incident_id: str,
+        text: str,
+        cad_updates: dict[str, Any] | None = None,
+        call_taker_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ep = self._get_running_episode(incident_id)
         self._assert_not_sealed(ep)
 
         turn = ep.awaiting_caller_for_turn
         caller_text = ep.pending_caller_text
         caller_metadata = ep.pending_caller_metadata
+        ct_metadata = self._sanitize_call_taker_metadata(call_taker_metadata)
         ep.pending_caller_text = ""
         ep.pending_caller_metadata = None
 
@@ -184,6 +191,7 @@ class SimulationEngine:
                 "call_taker": text,
                 "caller": caller_text,
                 "caller_metadata": caller_metadata,
+                "call_taker_metadata": ct_metadata,
             },
         )
         ep.awaiting_caller_for_turn += 1
@@ -752,6 +760,17 @@ class SimulationEngine:
         if not isinstance(metadata, dict):
             return None
         allowed_keys = {"agent_profile_id", "source", "response_id", "fallback", "error_code"}
+        cleaned = {k: metadata[k] for k in allowed_keys if k in metadata}
+        if not cleaned:
+            return None
+        if "fallback" in cleaned:
+            cleaned["fallback"] = bool(cleaned["fallback"])
+        return cleaned
+
+    def _sanitize_call_taker_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(metadata, dict):
+            return None
+        allowed_keys = {"agent_profile_id", "source", "fallback", "fallback_reason", "error_code"}
         cleaned = {k: metadata[k] for k in allowed_keys if k in metadata}
         if not cleaned:
             return None

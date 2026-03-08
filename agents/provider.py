@@ -528,6 +528,27 @@ class OpenAICallTakerAgent:
         self._opening_sent = False
         self._fallback = CallTakerAgent(incident_json=incident_json, temperature=temperature)
 
+    def _fallback_decision(
+        self,
+        *,
+        caller_text: str,
+        cad_state: dict[str, Any],
+        system_events: list[dict[str, Any]],
+        reason: str,
+        error_code: str | None = None,
+    ) -> CTDecision:
+        d = self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+        md: dict[str, Any] = {
+            "agent_profile_id": "openai_calltaker_json",
+            "source": "builtin_fallback",
+            "fallback": True,
+            "fallback_reason": reason,
+        }
+        if error_code:
+            md["error_code"] = error_code
+        d.call_taker_metadata = md
+        return d
+
     def next_turn(
         self,
         caller_text: str,
@@ -538,7 +559,16 @@ class OpenAICallTakerAgent:
         try:
             if not self._opening_sent and not str(caller_text or "").strip():
                 self._opening_sent = True
-                return CTDecision(text=self.opening_greeting, cad_updates={}, end_call=False)
+                return CTDecision(
+                    text=self.opening_greeting,
+                    cad_updates={},
+                    end_call=False,
+                    call_taker_metadata={
+                        "agent_profile_id": "openai_calltaker_json",
+                        "source": "openai",
+                        "fallback": False,
+                    },
+                )
             prompt = (
                 f"caller_text={caller_text}\n"
                 f"cad_state={json.dumps(cad_state)}\n"
@@ -566,9 +596,20 @@ class OpenAICallTakerAgent:
                 checkpoint_decisions=(
                     obj.get("checkpoint_decisions") if isinstance(obj.get("checkpoint_decisions"), list) else []
                 ),
+                call_taker_metadata={
+                    "agent_profile_id": "openai_calltaker_json",
+                    "source": "openai",
+                    "fallback": False,
+                },
             )
-        except Exception:
-            return self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+        except Exception as exc:
+            return self._fallback_decision(
+                caller_text=caller_text,
+                cad_state=cad_state,
+                system_events=system_events,
+                reason="exception",
+                error_code=type(exc).__name__,
+            )
 
 
 class OpenAISyntheticCallTakerAgent:
@@ -611,6 +652,27 @@ class OpenAISyntheticCallTakerAgent:
         self._pending_checkpoints: list[dict[str, Any]] = []
         self._opening_sent = False
 
+    def _fallback_decision(
+        self,
+        *,
+        caller_text: str,
+        cad_state: dict[str, Any],
+        system_events: list[dict[str, Any]],
+        reason: str,
+        error_code: str | None = None,
+    ) -> CTDecision:
+        d = self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+        md: dict[str, Any] = {
+            "agent_profile_id": "openai_synthetic_v1",
+            "source": "builtin_fallback",
+            "fallback": True,
+            "fallback_reason": reason,
+        }
+        if error_code:
+            md["error_code"] = error_code
+        d.call_taker_metadata = md
+        return d
+
     def next_turn(
         self,
         caller_text: str,
@@ -625,7 +687,16 @@ class OpenAISyntheticCallTakerAgent:
         try:
             if not self._opening_sent and not str(caller_text or "").strip():
                 self._opening_sent = True
-                return CTDecision(text=self.opening_greeting, cad_updates={}, end_call=False)
+                return CTDecision(
+                    text=self.opening_greeting,
+                    cad_updates={},
+                    end_call=False,
+                    call_taker_metadata={
+                        "agent_profile_id": "openai_synthetic_v1",
+                        "source": "openai_synthetic",
+                        "fallback": False,
+                    },
+                )
             if self._pending_checkpoints and self.checkpoint_strategy in {"auto_approve", "auto-deny", "auto_deny"}:
                 auto_decision = "approved" if self.checkpoint_strategy == "auto_approve" else "denied"
                 checkpoint_decisions = [
@@ -637,6 +708,11 @@ class OpenAISyntheticCallTakerAgent:
                     text="Please stay on the line while I continue processing your emergency.",
                     cad_updates={},
                     checkpoint_decisions=checkpoint_decisions,
+                    call_taker_metadata={
+                        "agent_profile_id": "openai_synthetic_v1",
+                        "source": "openai_synthetic",
+                        "fallback": False,
+                    },
                 )
 
             tools = self._tool_specs()
@@ -732,10 +808,26 @@ class OpenAISyntheticCallTakerAgent:
                     end_reason=str(end_reason) if end_reason else None,
                     end_reason_detail=str(end_reason_detail) if end_reason_detail else None,
                     checkpoint_decisions=[d for d in merged_checkpoint_decisions if isinstance(d, dict)],
+                    call_taker_metadata={
+                        "agent_profile_id": "openai_synthetic_v1",
+                        "source": "openai_synthetic",
+                        "fallback": False,
+                    },
                 )
-            return self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
-        except Exception:
-            return self._fallback.next_turn(caller_text=caller_text, cad_state=cad_state, system_events=system_events)
+            return self._fallback_decision(
+                caller_text=caller_text,
+                cad_state=cad_state,
+                system_events=system_events,
+                reason="tool_round_limit",
+            )
+        except Exception as exc:
+            return self._fallback_decision(
+                caller_text=caller_text,
+                cad_state=cad_state,
+                system_events=system_events,
+                reason="exception",
+                error_code=type(exc).__name__,
+            )
 
     def _parse_ct_json(self, raw: str) -> dict[str, Any]:
         text = str(raw or "").strip()

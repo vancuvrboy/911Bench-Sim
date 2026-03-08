@@ -474,7 +474,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 queued_caller_turns += 1
                 last_queued_caller_text = caller_text
             if not calltaker_manual:
-                self.app.engine.calltaker_post_turn(incident_id=incident_id, text=calltaker_text, cad_updates=cad_updates)
+                self.app.engine.calltaker_post_turn(
+                    incident_id=incident_id,
+                    text=calltaker_text,
+                    cad_updates=cad_updates,
+                    call_taker_metadata=getattr(decision, "call_taker_metadata", None) if not calltaker_replay else None,
+                )
                 for cp in getattr(decision, "checkpoint_decisions", []) if not calltaker_replay else []:
                     if not isinstance(cp, dict):
                         continue

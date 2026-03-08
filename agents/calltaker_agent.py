@@ -15,6 +15,7 @@ class CTDecision:
     end_reason_detail: str | None = None
     parse_error: bool = False
     checkpoint_decisions: list[dict[str, Any]] = field(default_factory=list)
+    call_taker_metadata: dict[str, Any] | None = None
 
 
 class CallTakerAgent:
