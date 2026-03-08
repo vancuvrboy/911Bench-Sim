@@ -25,3 +25,9 @@ Phase 1 SIM-AGT validation suite:
 ```bash
 python3 -m tests.harness.phase1_validation --root . --output-dir tests/reports
 ```
+
+Southbound integration server (for governance integration harnesses):
+
+```bash
+python3 -m sim_server.southbound_server --root . --port 8300
+```
