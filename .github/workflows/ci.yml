@@ -1,4 +1,4 @@
-name: Governance CI
+name: SIM CI
 
 on:
   push:
@@ -23,34 +23,14 @@ jobs:
 
       - name: Compile Check
         run: |
-          python -m py_compile $(find gov_server tests scripts -name "*.py")
+          python -m py_compile $(find agents sim_server harness tests -name "*.py")
 
-      - name: Unit and Integration Tests
+      - name: SIM Phase 1 Validation
         run: |
-          python -m unittest tests.test_state_store tests.test_southbound_security tests.test_southbound_resilience tests.test_mcp_server tests.test_python_sdk
-
-      - name: Harness Runner
-        run: |
-          python -m tests.harness.runner --root . --cases-dir tests/cases --output-dir tests/results
-
-      - name: Quality Gate
-        run: |
-          python -m tests.harness.quality_gate --report tests/results/governance_harness_report.json --max-p95-ms 200
-
-      - name: Conformance Matrix
-        run: |
-          python -m tests.harness.conformance_matrix --root . --output-dir tests/results
-
-      - name: WP1 Validation
-        run: |
-          python -m tests.harness.wp1_validation --root . --output-dir tests/results
-
-      - name: Generate SBOM
-        run: |
-          python scripts/generate_sbom.py --root . --output tests/results/sbom_manifest.json
+          python -m tests.harness.phase1_validation --root . --output-dir tests/reports
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: governance-results
-          path: tests/results
+          name: sim-results
+          path: tests/reports
