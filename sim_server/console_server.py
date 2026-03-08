@@ -23,6 +23,7 @@ from agents import (
     create_calltaker_agent,
     create_caller_agent,
     create_qa_agent,
+    get_profile,
     is_manual,
     is_replay,
     list_profiles,
@@ -277,6 +278,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         qa = load_json(root / qa_fixture)
         incident = json.loads(json.dumps(incident))
         incident["max_turns"] = max_turns
+        event_agent_config = self._event_agent_config_snapshot(
+            caller_agent_id=caller_agent_id,
+            calltaker_agent_id=calltaker_agent_id,
+            qa_agent_id=qa_agent_id,
+        )
 
         self.app.engine = SimulationEngine(execution_id=f"console-{scenario_id}")
         loaded = self.app.engine.admin_load_scenario(
@@ -285,6 +291,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             incident_json=incident,
             qa_template_id=str(qa.get("version", "003")),
             qa_template_json=qa,
+            agent_config_snapshot=event_agent_config,
         )
         started = self.app.engine.episode_start(loaded["incident_id"])
         self.app.incident_id = loaded["incident_id"]
@@ -508,6 +515,48 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "config_sha256": hashlib.sha256(raw).hexdigest(),
             }
         return manifest
+
+    def _event_agent_config_snapshot(self, caller_agent_id: str, calltaker_agent_id: str, qa_agent_id: str) -> dict[str, Any]:
+        return {
+            "caller_agent": self._event_agent_entry(role="caller", profile_id=caller_agent_id),
+            "calltaker_agent": self._event_agent_entry(role="calltaker", profile_id=calltaker_agent_id),
+            "helper_agent": None,
+            "qa_agent": self._event_agent_entry(role="qa", profile_id=qa_agent_id),
+        }
+
+    def _event_agent_entry(self, role: str, profile_id: str) -> dict[str, Any]:
+        profile = get_profile(role, profile_id)
+        cfg = self._load_agent_yaml_for_profile(role=role, profile_id=profile_id)
+        system_prompt = cfg.get("system_prompt")
+        prompt_hash = "none"
+        if isinstance(system_prompt, str) and system_prompt.strip():
+            prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+        entry: dict[str, Any] = {
+            "profile_id": profile.id,
+            "provider": profile.provider,
+            "mode": profile.mode,
+            "model": str(cfg.get("model", profile.model)),
+            "temperature": float(cfg.get("temperature", profile.temperature)),
+            "prompt_hash": prompt_hash,
+        }
+        config_path = (self.app.agent_config_root or Path(".")) / f"{role}.{profile_id}.yaml"
+        if config_path.exists():
+            entry["config_sha256"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        return entry
+
+    def _load_agent_yaml_for_profile(self, role: str, profile_id: str) -> dict[str, Any]:
+        root = self.app.agent_config_root
+        if root is None:
+            return {}
+        path = root / f"{role}.{profile_id}.yaml"
+        if not path.exists():
+            return {}
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            return {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
 
     def _artifact_extra_meta(self, incident_id: str) -> dict[str, Any]:
         return {

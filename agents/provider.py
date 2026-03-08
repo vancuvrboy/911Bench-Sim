@@ -237,6 +237,7 @@ class OpenAICallerAgent:
         caller_json: dict[str, Any],
         incident_json: dict[str, Any],
         agent_config: dict[str, Any] | None = None,
+        agent_profile_id: str = "openai",
     ) -> None:
         self.client = _create_openai_client()
         cfg = agent_config or {}
@@ -253,6 +254,7 @@ class OpenAICallerAgent:
         )
         self.caller_json = caller_json
         self.incident_json = incident_json
+        self.agent_profile_id = agent_profile_id
         self.turn_index = 0
         self.previous_response_id: str | None = None
         self._seeded = False
@@ -348,20 +350,21 @@ class OpenAICallerAgent:
                 ]
             )
 
-            _, fallback_meta = self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
-            meta = dict(fallback_meta)
-            meta.update(
-                {
-                    "model_provider": "openai",
-                    "model": self.model,
-                    "api": "responses",
-                    "response_id": response_id,
-                    "seed_mode": "full_json_seed_once_then_incremental_turn_updates",
-                }
-            )
+            meta = {
+                "agent_profile_id": self.agent_profile_id,
+                "source": "openai_responses",
+                "response_id": response_id,
+                "fallback": False,
+            }
             return text, meta
-        except Exception:
-            return self._fallback_turn(call_taker_text=call_taker_text, system_events=system_events)
+        except Exception as exc:
+            text, _ = self._fallback_turn(call_taker_text=call_taker_text, system_events=system_events)
+            return text, {
+                "agent_profile_id": self.agent_profile_id,
+                "source": "builtin_fallback",
+                "fallback": True,
+                "error_code": type(exc).__name__,
+            }
 
 
 class OpenAICallTakerAgent:
@@ -468,6 +471,7 @@ def _create_openai_caller(
         caller_json=caller_json,
         incident_json=incident_json,
         agent_config=agent_config,
+        agent_profile_id=profile.id,
     )
 
 
