@@ -44,6 +44,7 @@ class ConsoleState:
     caller_agent: CallerAgent | None = None
     calltaker_agent: CallTakerAgent | None = None
     qa_agent: QAEvaluatorAgent | None = None
+    agent_config_root: Path | None = None
     replay_steps: list[dict[str, Any]] | None = None
     replay_idx: int = 0
     last_qa_score: dict[str, Any] | None = None
@@ -203,9 +204,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.app.caller_agent_id = caller_agent_id
         self.app.calltaker_agent_id = calltaker_agent_id
         self.app.qa_agent_id = qa_agent_id
-        self.app.caller_agent = create_caller_agent(caller_agent_id, caller_json=caller, incident_json=incident)
-        self.app.calltaker_agent = create_calltaker_agent(calltaker_agent_id, incident_json=incident, dispatch_enabled=True)
-        self.app.qa_agent = create_qa_agent(qa_agent_id, qa_template_json=qa)
+        self.app.caller_agent = create_caller_agent(
+            caller_agent_id,
+            caller_json=caller,
+            incident_json=incident,
+            config_root=self.app.agent_config_root,
+        )
+        self.app.calltaker_agent = create_calltaker_agent(
+            calltaker_agent_id,
+            incident_json=incident,
+            dispatch_enabled=True,
+            config_root=self.app.agent_config_root,
+        )
+        self.app.qa_agent = create_qa_agent(
+            qa_agent_id,
+            qa_template_json=qa,
+            config_root=self.app.agent_config_root,
+        )
         self.app.replay_steps = self._load_replay_for_console(scenario_id, incident)
         self.app.replay_idx = 0
         self.app.last_qa_score = None
@@ -502,11 +517,17 @@ def main() -> None:
     parser.add_argument("--root", default=".")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8101)
+    parser.add_argument("--agent-config-dir", default="agents/config")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     ui_root = root / "ui"
-    state = ConsoleState(root=root, ui_root=ui_root, engine=SimulationEngine(execution_id="console-init"))
+    state = ConsoleState(
+        root=root,
+        ui_root=ui_root,
+        engine=SimulationEngine(execution_id="console-init"),
+        agent_config_root=(root / args.agent_config_dir).resolve(),
+    )
 
     server = ThreadingHTTPServer((args.host, args.port), ConsoleHandler)
     server.app_state = state  # type: ignore[attr-defined]

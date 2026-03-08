@@ -42,7 +42,7 @@ python3 -m harness.sim_episode_runner --root . --output-dir tests/reports --mode
 Run the thin backend + single-page console:
 
 ```bash
-python3 -m sim_server.console_server --root . --host 127.0.0.1 --port 8101
+python3 -m sim_server.console_server --root . --host 127.0.0.1 --port 8101 --agent-config-dir agents/config
 ```
 
 Open:
@@ -73,14 +73,10 @@ Required:
 export OPENAI_API_KEY="<your_key>"
 ```
 
-Optional caller tuning:
+Caller model/prompt settings are loaded from YAML config files at startup (one file per role+profile):
 
-```bash
-export OPENAI_CALLER_MODEL="gpt-4o-mini"
-export OPENAI_CALLER_TEMPERATURE="0.3"
-export OPENAI_CALLER_SYSTEM_PROMPT_FILE="/absolute/path/to/caller_system_prompt.txt"
-# or inline prompt:
-export OPENAI_CALLER_SYSTEM_PROMPT="You are a 911 caller ..."
-```
+- `agents/config/caller.openai_gpt4o_mini_v1.yaml`
+- `agents/config/calltaker.openai_gpt4o_mini_v1.yaml`
+- `agents/config/qa.openai_gpt4o_mini_v1.yaml`
 
 The caller adapter uses OpenAI `responses.create(...)` and falls back to deterministic caller behavior if generation fails.

@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+
 from agents.caller_agent import CallerAgent
 from agents.calltaker_agent import CTDecision, CallTakerAgent
 from agents.qa_agent import QAEvaluatorAgent
@@ -155,31 +156,67 @@ def is_manual(role: str, agent_id: str) -> bool:
     return get_profile(role, agent_id).mode == "manual"
 
 
-def create_caller_agent(agent_id: str, caller_json: dict[str, Any], incident_json: dict[str, Any]) -> CallerAgent | Any | None:
+def create_caller_agent(
+    agent_id: str,
+    caller_json: dict[str, Any],
+    incident_json: dict[str, Any],
+    *,
+    config_root: str | Path | None = None,
+) -> CallerAgent | Any | None:
     profile = get_profile("caller", agent_id)
     if profile.mode in {"manual", "replay"}:
         return None
     if profile.provider == "builtin":
         return CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=profile.temperature)
-    return _create_openai_caller(profile, caller_json, incident_json)
+    cfg = _load_agent_config(config_root=config_root, role="caller", agent_id=agent_id)
+    return _create_openai_caller(profile, caller_json, incident_json, agent_config=cfg)
 
 
-def create_calltaker_agent(agent_id: str, incident_json: dict[str, Any], **kwargs: Any) -> CallTakerAgent | Any | None:
+def create_calltaker_agent(
+    agent_id: str,
+    incident_json: dict[str, Any],
+    *,
+    config_root: str | Path | None = None,
+    **kwargs: Any,
+) -> CallTakerAgent | Any | None:
     profile = get_profile("calltaker", agent_id)
     if profile.mode in {"manual", "replay"}:
         return None
     if profile.provider == "builtin":
         return CallTakerAgent(incident_json=incident_json, temperature=profile.temperature, **kwargs)
-    return _create_openai_calltaker(profile, incident_json)
+    cfg = _load_agent_config(config_root=config_root, role="calltaker", agent_id=agent_id)
+    return _create_openai_calltaker(profile, incident_json, agent_config=cfg)
 
 
-def create_qa_agent(agent_id: str, qa_template_json: dict[str, Any], **kwargs: Any) -> QAEvaluatorAgent | Any | None:
+def create_qa_agent(
+    agent_id: str,
+    qa_template_json: dict[str, Any],
+    *,
+    config_root: str | Path | None = None,
+    **kwargs: Any,
+) -> QAEvaluatorAgent | Any | None:
     profile = get_profile("qa", agent_id)
     if profile.mode in {"manual", "replay"}:
         return None
     if profile.provider == "builtin":
         return QAEvaluatorAgent(qa_template_json=qa_template_json, temperature=profile.temperature, **kwargs)
-    return _create_openai_qa(profile, qa_template_json)
+    cfg = _load_agent_config(config_root=config_root, role="qa", agent_id=agent_id)
+    return _create_openai_qa(profile, qa_template_json, agent_config=cfg)
+
+
+def _load_agent_config(config_root: str | Path | None, role: str, agent_id: str) -> dict[str, Any]:
+    if config_root is None:
+        return {}
+    base = Path(config_root)
+    path = base / f"{role}.{agent_id}.yaml"
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return {}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
 
 
 def _create_openai_client() -> Any:
@@ -192,44 +229,68 @@ def _create_openai_client() -> Any:
     return OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
-def _read_prompt_from_env() -> str:
-    prompt_file = str(os.environ.get("OPENAI_CALLER_SYSTEM_PROMPT_FILE", "")).strip()
-    if prompt_file:
-        path = Path(prompt_file).expanduser()
-        if path.exists():
-            return path.read_text(encoding="utf-8")
-    inline_prompt = str(os.environ.get("OPENAI_CALLER_SYSTEM_PROMPT", "")).strip()
-    if inline_prompt:
-        return inline_prompt
-    return (
-        "You are role-playing a 911 caller in a training simulator. "
-        "Speak naturally as a stressed but cooperative caller. "
-        "Only output the caller utterance text, no JSON, no labels, no analysis. "
-        "Keep responses concise (1-3 sentences)."
-    )
-
-
 class OpenAICallerAgent:
-    def __init__(self, model: str, temperature: float, caller_json: dict[str, Any], incident_json: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        model: str,
+        temperature: float,
+        caller_json: dict[str, Any],
+        incident_json: dict[str, Any],
+        agent_config: dict[str, Any] | None = None,
+    ) -> None:
         self.client = _create_openai_client()
-        self.model = str(os.environ.get("OPENAI_CALLER_MODEL", model)).strip() or model
-        self.temperature = float(os.environ.get("OPENAI_CALLER_TEMPERATURE", str(temperature)))
+        cfg = agent_config or {}
+        self.model = str(cfg.get("model", model))
+        self.temperature = float(cfg.get("temperature", temperature))
+        self.max_output_tokens = int(cfg.get("max_output_tokens", 120))
+        self.system_prompt = str(
+            cfg.get(
+                "system_prompt",
+                "You are role-playing a 911 caller in a training simulator. Speak naturally as a stressed but cooperative caller. "
+                "Only output the caller utterance text, no JSON, no labels, no analysis.",
+            )
+        )
         self.caller_json = caller_json
         self.incident_json = incident_json
-        self.system_prompt = _read_prompt_from_env()
         self._fallback = CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=temperature)
 
     def _user_prompt(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> str:
-        profile_id = str(self.caller_json.get("profile_id", "CALLER-UNKNOWN"))
-        incident_type = str(self.incident_json.get("type", "Unknown"))
-        opening = str((self.incident_json.get("caller_view", {}) or {}).get("initial_opening_line", "I need help."))
+        identity = self.caller_json.get("identity", {}) if isinstance(self.caller_json.get("identity"), dict) else {}
+        speech = self.caller_json.get("speech", {}) if isinstance(self.caller_json.get("speech"), dict) else {}
+        incident_location = self.incident_json.get("location", {}) if isinstance(self.incident_json.get("location"), dict) else {}
+        caller_view = self.incident_json.get("caller_view", {}) if isinstance(self.incident_json.get("caller_view"), dict) else {}
+
+        seed_context = {
+            "caller_profile_id": self.caller_json.get("profile_id", "CALLER-UNKNOWN"),
+            "caller_identity": {
+                "name": identity.get("name"),
+                "callback_number": identity.get("phone_number"),
+            },
+            "speech_style": {
+                "tone": speech.get("tone"),
+                "pace": speech.get("pace"),
+                "disfluencies": speech.get("disfluencies", []),
+            },
+            "disclosure_policy": self.caller_json.get("disclosure_policy", {}),
+            "example_short_answers": self.caller_json.get("example_short_answers", {}),
+            "incident_type": self.incident_json.get("type", "Unknown"),
+            "incident_location": {
+                "address_line": incident_location.get("address_line"),
+                "city": incident_location.get("city"),
+            },
+            "caller_view": {
+                "opening_line": caller_view.get("initial_opening_line"),
+                "known_facts": caller_view.get("known_facts", []),
+            },
+            "progression_by_turn": self.incident_json.get("progression_by_turn", []),
+        }
+
         return (
-            f"caller_profile_id={profile_id}\n"
-            f"incident_type={incident_type}\n"
-            f"opening_line_hint={opening}\n"
+            "Generate the next caller utterance for this exact seeded scenario.\n"
+            f"seed_context={json.dumps(seed_context)}\n"
             f"latest_call_taker_text={call_taker_text}\n"
             f"recent_system_events={json.dumps(system_events[-4:])}\n"
-            "Generate the next caller utterance now."
+            "Output only the caller text."
         )
 
     def _extract_text(self, resp: Any) -> str:
@@ -256,6 +317,7 @@ class OpenAICallerAgent:
             resp = self.client.responses.create(
                 model=self.model,
                 temperature=self.temperature,
+                max_output_tokens=self.max_output_tokens,
                 input=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": self._user_prompt(call_taker_text, system_events)},
@@ -280,18 +342,29 @@ class OpenAICallerAgent:
 
 
 class OpenAICallTakerAgent:
-    def __init__(self, model: str, temperature: float, incident_json: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        model: str,
+        temperature: float,
+        incident_json: dict[str, Any],
+        agent_config: dict[str, Any] | None = None,
+    ) -> None:
+        cfg = agent_config or {}
         self.client = _create_openai_client()
-        self.model = model
-        self.temperature = temperature
+        self.model = str(cfg.get("model", model))
+        self.temperature = float(cfg.get("temperature", temperature))
+        self.system_prompt = str(
+            cfg.get(
+                "system_prompt",
+                "You are a 911 call-taker. Return strict JSON with keys: text(str), cad_updates(object), end_call(bool), end_reason(str|null).",
+            )
+        )
         self.incident_json = incident_json
         self._fallback = CallTakerAgent(incident_json=incident_json, temperature=temperature)
 
     def next_turn(self, caller_text: str, cad_state: dict[str, Any], system_events: list[dict[str, Any]]) -> CTDecision:
         try:
             prompt = (
-                "You are a 911 call-taker. Return strict JSON with keys: "
-                "text(str), cad_updates(object), end_call(bool), end_reason(str|null).\n"
                 f"caller_text={caller_text}\n"
                 f"cad_state={json.dumps(cad_state)}\n"
                 f"system_events={json.dumps(system_events[-3:])}\n"
@@ -299,7 +372,10 @@ class OpenAICallTakerAgent:
             resp = self.client.chat.completions.create(
                 model=self.model,
                 temperature=self.temperature,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
             )
             raw = (resp.choices[0].message.content or "").strip()
             obj = json.loads(raw)
@@ -316,24 +392,36 @@ class OpenAICallTakerAgent:
 
 
 class OpenAIQAEvaluatorAgent:
-    def __init__(self, model: str, temperature: float, qa_template_json: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        model: str,
+        temperature: float,
+        qa_template_json: dict[str, Any],
+        agent_config: dict[str, Any] | None = None,
+    ) -> None:
+        cfg = agent_config or {}
         self.client = _create_openai_client()
-        self.model = model
-        self.temperature = temperature
+        self.model = str(cfg.get("model", model))
+        self.temperature = float(cfg.get("temperature", temperature))
+        self.system_prompt = str(
+            cfg.get(
+                "system_prompt",
+                "Score this 911 transcript. Return strict JSON with fields matching deterministic QA output.",
+            )
+        )
         self.qa_template_json = qa_template_json
         self._fallback = QAEvaluatorAgent(qa_template_json=qa_template_json, temperature=temperature)
 
     def evaluate(self, events: list[dict[str, Any]], incident_type: str) -> dict[str, Any]:
         try:
-            prompt = (
-                "Score this 911 transcript. Return strict JSON with fields matching deterministic QA output.\n"
-                f"incident_type={incident_type}\n"
-                f"events={json.dumps(events[-30:])}\n"
-            )
+            prompt = f"incident_type={incident_type}\nevents={json.dumps(events[-30:])}\n"
             resp = self.client.chat.completions.create(
                 model=self.model,
                 temperature=self.temperature,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
             )
             raw = (resp.choices[0].message.content or "").strip()
             parsed = json.loads(raw)
@@ -344,13 +432,35 @@ class OpenAIQAEvaluatorAgent:
             return self._fallback.evaluate(events=events, incident_type=incident_type)
 
 
-def _create_openai_caller(profile: AgentProfile, caller_json: dict[str, Any], incident_json: dict[str, Any]) -> OpenAICallerAgent:
-    return OpenAICallerAgent(model=profile.model, temperature=profile.temperature, caller_json=caller_json, incident_json=incident_json)
+def _create_openai_caller(
+    profile: AgentProfile,
+    caller_json: dict[str, Any],
+    incident_json: dict[str, Any],
+    *,
+    agent_config: dict[str, Any],
+) -> OpenAICallerAgent:
+    return OpenAICallerAgent(
+        model=profile.model,
+        temperature=profile.temperature,
+        caller_json=caller_json,
+        incident_json=incident_json,
+        agent_config=agent_config,
+    )
 
 
-def _create_openai_calltaker(profile: AgentProfile, incident_json: dict[str, Any]) -> OpenAICallTakerAgent:
-    return OpenAICallTakerAgent(model=profile.model, temperature=profile.temperature, incident_json=incident_json)
+def _create_openai_calltaker(profile: AgentProfile, incident_json: dict[str, Any], *, agent_config: dict[str, Any]) -> OpenAICallTakerAgent:
+    return OpenAICallTakerAgent(
+        model=profile.model,
+        temperature=profile.temperature,
+        incident_json=incident_json,
+        agent_config=agent_config,
+    )
 
 
-def _create_openai_qa(profile: AgentProfile, qa_template_json: dict[str, Any]) -> OpenAIQAEvaluatorAgent:
-    return OpenAIQAEvaluatorAgent(model=profile.model, temperature=profile.temperature, qa_template_json=qa_template_json)
+def _create_openai_qa(profile: AgentProfile, qa_template_json: dict[str, Any], *, agent_config: dict[str, Any]) -> OpenAIQAEvaluatorAgent:
+    return OpenAIQAEvaluatorAgent(
+        model=profile.model,
+        temperature=profile.temperature,
+        qa_template_json=qa_template_json,
+        agent_config=agent_config,
+    )
