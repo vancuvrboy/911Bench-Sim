@@ -55,6 +55,29 @@
               "points": 5
             }
           ]
+        },
+        {
+          "name": "Stress Response Quality",
+          "applies_when": {
+            "stress_min_level": 1
+          },
+          "answer_set": [
+            "YES",
+            "NO",
+            "NA"
+          ],
+          "items": [
+            {
+              "id": "stress_call_control",
+              "question": "Maintained calm control under elevated caller stress",
+              "points": 5
+            },
+            {
+              "id": "stress_information_recovery",
+              "question": "Recovered key information despite stressors/interruption",
+              "points": 5
+            }
+          ]
         }
       ]
     },

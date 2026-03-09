@@ -1273,7 +1273,8 @@ class OpenAIQAEvaluatorAgent:
     def _normalize_score_payload(self, obj: dict[str, Any], incident_type: str, qa_input: dict[str, Any] | None = None) -> dict[str, Any]:
         if "normalized_score" not in obj:
             raise ValueError("qa_missing_normalized_score")
-        template_idx = self._template_item_index(str(incident_type).upper())
+        stress_level = self._qa_stress_level(qa_input)
+        template_idx = self._template_item_index(str(incident_type).upper(), stress_level=stress_level)
         transcript = (qa_input or {}).get("transcript", []) if isinstance(qa_input, dict) else []
         items = obj.get("items") if isinstance(obj.get("items"), list) else []
         if not items and isinstance(obj.get("rows"), list):
@@ -1287,6 +1288,7 @@ class OpenAIQAEvaluatorAgent:
                 continue
             item_id = str(it.get("id", "unknown"))
             tpl = template_idx.get(item_id, {})
+            section_active = bool(tpl.get("active", True))
             pp_raw = it.get("points_possible", it.get("max_points", tpl.get("points", 0.0)))
             pa_raw = it.get("points_awarded", it.get("awarded", 0.0))
             pp = float(pp_raw or 0.0)
@@ -1299,6 +1301,8 @@ class OpenAIQAEvaluatorAgent:
                     ans = "NO"
                 else:
                     ans = "YES"
+            if not section_active:
+                ans = "NA"
             # Policy hardening: if call-taker clearly asked the required question,
             # award full credit even when caller refused/couldn't answer.
             if ans in {"REFUSED", "NO"} and pp > 0 and self._was_required_question_clearly_asked(
@@ -1309,7 +1313,7 @@ class OpenAIQAEvaluatorAgent:
                 ans = "YES"
             # Resolve inconsistent model outputs deterministically:
             # if positive points are awarded, treat as YES regardless of answer token.
-            if pp > 0 and pa > 0 and ans != "YES":
+            if section_active and pp > 0 and pa > 0 and ans != "YES":
                 ans = "YES"
             # Enforce binary/no-partial scoring policy:
             # YES => full points; NO/REFUSED/NA => 0
@@ -1407,7 +1411,7 @@ class OpenAIQAEvaluatorAgent:
             )
         return rows
 
-    def _template_item_index(self, incident_type: str) -> dict[str, dict[str, Any]]:
+    def _template_item_index(self, incident_type: str, *, stress_level: int = 0) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         templates = self.qa_template_json.get("templates", {})
         if not isinstance(templates, dict):
@@ -1419,13 +1423,36 @@ class OpenAIQAEvaluatorAgent:
             for sec in block.get("sections", []):
                 if not isinstance(sec, dict):
                     continue
+                active = self._section_applies(sec, stress_level=stress_level)
                 for item in sec.get("items", []):
                     if isinstance(item, dict) and item.get("id"):
                         out[str(item["id"])] = {
                             "points": float(item.get("points", 0.0) or 0.0),
                             "question": str(item.get("question", "")),
+                            "active": active,
                         }
         return out
+
+    def _qa_stress_level(self, qa_input: dict[str, Any] | None) -> int:
+        if not isinstance(qa_input, dict):
+            return 0
+        level = 0
+        for ev in qa_input.get("stress_events", []) if isinstance(qa_input.get("stress_events"), list) else []:
+            if isinstance(ev, dict):
+                level = max(level, int(ev.get("stress_level", 0) or 0))
+        meta = qa_input.get("meta")
+        if isinstance(meta, dict):
+            level = max(level, int(meta.get("stress_level", 0) or 0))
+        return max(0, min(5, level))
+
+    def _section_applies(self, section: dict[str, Any], *, stress_level: int) -> bool:
+        applies = section.get("applies_when")
+        if not isinstance(applies, dict):
+            return True
+        min_stress = applies.get("stress_min_level")
+        if isinstance(min_stress, (int, float)) and stress_level < int(min_stress):
+            return False
+        return True
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()
