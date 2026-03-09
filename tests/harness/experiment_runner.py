@@ -156,6 +156,7 @@ def run_experiment(
                     "mode": mode,
                     "stress_level": scenario.get("stress_level"),
                     "channel": scenario.get("channel"),
+                    "dsa_profile": scenario.get("dsa_profile"),
                 }
             )
 
@@ -192,6 +193,7 @@ def run_experiment(
                 "mode",
                 "stress_level",
                 "channel",
+                "dsa_profile",
             ],
         )
         writer.writeheader()

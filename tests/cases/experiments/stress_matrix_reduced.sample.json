@@ -21,7 +21,8 @@
       "repetitions": 1,
       "max_turns": 16,
       "stress_level": "{level}",
-      "channel": "{channel}"
+      "channel": "{channel}",
+      "dsa_profile": "deterministic_911buddy_v1"
     }
   ]
 }
