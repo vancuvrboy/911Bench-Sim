@@ -1075,23 +1075,13 @@ class OpenAIQAEvaluatorAgent:
         self.qa_template_json = qa_template_json
         self._fallback = QAEvaluatorAgent(qa_template_json=qa_template_json, temperature=temperature)
 
-    def evaluate(self, events: list[dict[str, Any]], incident_type: str) -> dict[str, Any]:
-        transcript = self._conversation_rows(events)
-        packet = {
-            "incident_type": incident_type,
-            "qa_template": self.qa_template_json,
-            "transcript": transcript[-80:],
-            "required_output_fields": [
-                "evaluator_agent_id",
-                "qa_template_id",
-                "incident_type",
-                "sections_applied",
-                "items",
-                "total_points_awarded",
-                "total_points_possible",
-                "normalized_score",
-            ],
-        }
+    def evaluate(
+        self,
+        events: list[dict[str, Any]],
+        incident_type: str,
+        qa_input: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        packet = qa_input if isinstance(qa_input, dict) else self._build_packet(events=events, incident_type=incident_type)
         prompt = json.dumps(packet)
         last_error_code = "unknown"
         retries = 0
@@ -1138,6 +1128,25 @@ class OpenAIQAEvaluatorAgent:
         fallback["error_code"] = last_error_code
         return fallback
 
+    def _build_packet(self, *, events: list[dict[str, Any]], incident_type: str) -> dict[str, Any]:
+        transcript = self._conversation_rows(events)
+        return {
+            "incident_type": incident_type,
+            "template": self.qa_template_json,
+            "transcript": transcript,
+            "required_output_fields": [
+                "evaluator_agent_id",
+                "qa_template_id",
+                "incident_type",
+                "sections_applied",
+                "items",
+                "total_points_awarded",
+                "total_points_possible",
+                "normalized_score",
+                "notes",
+            ],
+        }
+
     def _parse_json_payload(self, raw: str) -> dict[str, Any]:
         text = str(raw or "").strip()
         if not text:
@@ -1159,31 +1168,57 @@ class OpenAIQAEvaluatorAgent:
     def _normalize_score_payload(self, obj: dict[str, Any], incident_type: str) -> dict[str, Any]:
         if "normalized_score" not in obj:
             raise ValueError("qa_missing_normalized_score")
+        template_idx = self._template_item_index(str(incident_type).upper())
         items = obj.get("items") if isinstance(obj.get("items"), list) else []
+        if not items and isinstance(obj.get("rows"), list):
+            items = obj.get("rows")
         norm_items: list[dict[str, Any]] = []
+        answer_enum = {"YES", "NO", "REFUSED", "NA"}
         awarded = 0.0
         possible = 0.0
         for it in items:
             if not isinstance(it, dict):
                 continue
-            pa = float(it.get("points_awarded", 0.0) or 0.0)
-            pp = float(it.get("points_possible", 0.0) or 0.0)
+            item_id = str(it.get("id", "unknown"))
+            tpl = template_idx.get(item_id, {})
+            pp_raw = it.get("points_possible", it.get("max_points", tpl.get("points", 0.0)))
+            pa_raw = it.get("points_awarded", it.get("awarded", 0.0))
+            pp = float(pp_raw or 0.0)
+            pa = float(pa_raw or 0.0)
+            ans = str(it.get("answer", "")).strip().upper()
+            if ans not in answer_enum:
+                if pp <= 0:
+                    ans = "NA"
+                elif pa <= 0:
+                    ans = "NO"
+                else:
+                    ans = "YES"
+            # Resolve inconsistent model outputs deterministically:
+            # if positive points are awarded, treat as YES regardless of answer token.
+            if pp > 0 and pa > 0 and ans != "YES":
+                ans = "YES"
+            if pp > 0 and pa <= 0 and ans == "YES":
+                ans = "NO"
+            # Enforce binary/no-partial scoring policy:
+            # YES => full points; NO/REFUSED/NA => 0
+            pa = pp if ans == "YES" else 0.0
             awarded += pa
             possible += pp
             norm_items.append(
                 {
-                    "id": str(it.get("id", "unknown")),
-                    "answer": str(it.get("answer", "NO")),
+                    "id": item_id,
+                    "answer": ans,
                     "points_awarded": pa,
                     "points_possible": pp,
                     "rationale": str(it.get("rationale", "")),
                     "evidence_turns": [int(x) for x in it.get("evidence_turns", []) if isinstance(x, (int, float))],
                 }
             )
-        total_awarded = float(obj.get("total_points_awarded", awarded) or awarded)
-        total_possible = float(obj.get("total_points_possible", possible) or possible)
-        normalized = float(obj.get("normalized_score", 0.0) or 0.0)
-        qa_template_id = str(obj.get("qa_template_id", self.qa_template_json.get("version", "unknown")))
+        total_awarded = awarded
+        total_possible = possible
+        normalize_to = float(self.qa_template_json.get("normalize_to", 100) or 100.0)
+        normalized = (total_awarded / total_possible * normalize_to) if total_possible > 0 else 0.0
+        qa_template_id = str(self.qa_template_json.get("version", obj.get("qa_template_id", "unknown")))
         sections = obj.get("sections_applied")
         if not isinstance(sections, list):
             sections = ["COMMON", str(incident_type).upper()]
@@ -1197,6 +1232,7 @@ class OpenAIQAEvaluatorAgent:
             "total_points_possible": total_possible,
             "normalized_score": max(0.0, min(100.0, normalized)),
             "parse_retry_count": 0,
+            "notes": str(obj.get("notes", "")).strip(),
         }
 
     def _conversation_rows(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1212,6 +1248,25 @@ class OpenAIQAEvaluatorAgent:
                 }
             )
         return rows
+
+    def _template_item_index(self, incident_type: str) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        templates = self.qa_template_json.get("templates", {})
+        if not isinstance(templates, dict):
+            return out
+        for key in ("COMMON", incident_type):
+            block = templates.get(key)
+            if not isinstance(block, dict):
+                continue
+            for sec in block.get("sections", []):
+                if not isinstance(sec, dict):
+                    continue
+                for item in sec.get("items", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        out[str(item["id"])] = {
+                            "points": float(item.get("points", 0.0) or 0.0),
+                        }
+        return out
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()
