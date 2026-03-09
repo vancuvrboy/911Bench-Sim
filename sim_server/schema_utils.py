@@ -28,6 +28,11 @@ def validate_seed_triplet(caller_json: dict[str, Any], incident_json: dict[str, 
         for key, value in disclosure.items():
             if value not in allowed_disclosure:
                 raise ValidationError("seed_validation_error", f"caller.json disclosure_policy invalid value for {key}")
+    stressor = caller_json.get("stressor_config", {})
+    if isinstance(stressor, dict) and "stress_level" in stressor:
+        level = stressor.get("stress_level")
+        if not isinstance(level, int) or level < 0 or level > 5:
+            raise ValidationError("seed_validation_error", "caller.json stressor_config.stress_level must be integer in [0,5]")
 
     _require(incident_json, "id", "incident.json missing id")
     incident_type = incident_json.get("type")
@@ -36,6 +41,11 @@ def validate_seed_triplet(caller_json: dict[str, Any], incident_json: dict[str, 
     frd = incident_json.get("first_responder_delay")
     if not isinstance(frd, int) or frd < 0:
         raise ValidationError("seed_validation_error", "incident.json first_responder_delay must be >= 0")
+    degradation = incident_json.get("calltaker_degradation_config", {})
+    if isinstance(degradation, dict) and "stress_level" in degradation:
+        level = degradation.get("stress_level")
+        if not isinstance(level, int) or level < 0 or level > 5:
+            raise ValidationError("seed_validation_error", "incident.json calltaker_degradation_config.stress_level must be integer in [0,5]")
 
     _require(qa_template_json, "templates", "qaTemplate missing templates")
     templates = qa_template_json.get("templates", {})
@@ -82,6 +92,8 @@ def validate_event_against_schema_like_rules(event: dict[str, Any]) -> list[str]
         "checkpoint_decision": ["request_id", "action_class", "decision", "approver_role", "latency_ms"],
         "episode_end": ["reason", "total_turns", "total_events", "final_record_version", "final_cad_state", "duration_ms"],
         "governance_correlation": ["action_id", "matched_rule_ids", "policy_id"],
+        "stressor_applied": ["turn", "marker", "stress_level"],
+        "degradation_applied": ["turn", "marker"],
     }
     if event_type not in {
         "meta",
@@ -95,6 +107,8 @@ def validate_event_against_schema_like_rules(event: dict[str, Any]) -> list[str]
         "governance_correlation",
         "ng911_message",
         "qa_score",
+        "stressor_applied",
+        "degradation_applied",
     }:
         errors.append("event_type_invalid")
         return errors
@@ -102,7 +116,19 @@ def validate_event_against_schema_like_rules(event: dict[str, Any]) -> list[str]
         if req not in event:
             errors.append(f"missing:{req}")
     if event_type == "conversation" and isinstance(event.get("caller_metadata"), dict):
-        allowed_meta_keys = {"agent_profile_id", "source", "response_id", "fallback", "error_code"}
+        allowed_meta_keys = {
+            "agent_profile_id",
+            "source",
+            "response_id",
+            "fallback",
+            "error_code",
+            "stress_level",
+            "stressor_markers",
+            "stressor_detail",
+            "emotional_state",
+            "disclosure_tracker",
+            "progression_note",
+        }
         for key in event["caller_metadata"].keys():
             if key not in allowed_meta_keys:
                 errors.append(f"caller_metadata_unknown:{key}")

@@ -8,7 +8,7 @@
   "properties": {
     "event_type": {
       "type": "string",
-      "enum": ["meta", "system", "conversation", "tool_call", "cad_patch_applied", "checkpoint_decision", "escalation", "episode_end", "governance_correlation", "ng911_message", "qa_score"]
+      "enum": ["meta", "system", "conversation", "tool_call", "cad_patch_applied", "checkpoint_decision", "escalation", "episode_end", "governance_correlation", "ng911_message", "qa_score", "stressor_applied", "degradation_applied"]
     },
     "ts": { "type": "string", "format": "date-time", "description": "Server-assigned ISO-8601 timestamp." },
     "incident_id": { "type": "string", "description": "Present on all events except meta's initial fields." },
@@ -51,7 +51,7 @@
           "turn": { "type": "integer" },
           "subtype": {
             "type": "string",
-            "enum": ["generic", "responders_arrived", "responders_dispatched", "call_dropped", "callback_attempt", "policy_transition", "max_turns_reached", "parse_error"]
+            "enum": ["generic", "responders_arrived", "responders_dispatched", "call_dropped", "callback_attempt", "policy_transition", "max_turns_reached", "parse_error", "silent_turn"]
           },
           "text": { "type": "string" },
           "detail": { "type": ["object", "null"] }
@@ -73,7 +73,13 @@
               "source": { "type": "string" },
               "response_id": { "type": "string" },
               "fallback": { "type": "boolean" },
-              "error_code": { "type": "string" }
+              "error_code": { "type": "string" },
+              "stress_level": { "type": "integer", "minimum": 0, "maximum": 5 },
+              "stressor_markers": { "type": "array", "items": { "type": "string" } },
+              "stressor_detail": { "type": "object" },
+              "emotional_state": { "type": "string" },
+              "disclosure_tracker": { "type": "object", "additionalProperties": { "type": "boolean" } },
+              "progression_note": { "type": ["string", "null"] }
             },
             "additionalProperties": false
           },
@@ -200,6 +206,29 @@
               }
             }
           }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event_type": { "const": "stressor_applied" } } },
+      "then": {
+        "required": ["turn", "marker", "stress_level"],
+        "properties": {
+          "turn": { "type": "integer", "minimum": 1 },
+          "marker": { "type": "string" },
+          "stress_level": { "type": "integer", "minimum": 0, "maximum": 5 },
+          "detail": { "type": ["object", "null"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event_type": { "const": "degradation_applied" } } },
+      "then": {
+        "required": ["turn", "marker"],
+        "properties": {
+          "turn": { "type": "integer", "minimum": 1 },
+          "marker": { "type": "string" },
+          "detail": { "type": ["object", "null"] }
         }
       }
     },

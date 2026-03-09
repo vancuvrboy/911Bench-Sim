@@ -34,6 +34,55 @@ def _build_run_id(prefix: str) -> str:
     return f"{clean_prefix}_{stamp}"
 
 
+def _apply_placeholders(value: Any, context: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        out = value
+        for key, v in context.items():
+            out = out.replace(f"{{{key}}}", str(v))
+        return out
+    if isinstance(value, list):
+        return [_apply_placeholders(v, context) for v in value]
+    if isinstance(value, dict):
+        return {k: _apply_placeholders(v, context) for k, v in value.items()}
+    return value
+
+
+def _expand_scenarios(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    scenarios_raw = manifest.get("scenarios", [])
+    if not isinstance(scenarios_raw, list):
+        raise ValueError("manifest.scenarios must be an array")
+    matrix = manifest.get("matrix")
+    if not isinstance(matrix, dict):
+        return [s for s in scenarios_raw if isinstance(s, dict)]
+
+    keys = [k for k, v in matrix.items() if isinstance(v, list) and v]
+    if not keys:
+        return [s for s in scenarios_raw if isinstance(s, dict)]
+
+    combos: list[dict[str, Any]] = [{}]
+    for key in keys:
+        vals = matrix[key]
+        next_combos: list[dict[str, Any]] = []
+        for combo in combos:
+            for val in vals:
+                c = dict(combo)
+                c[key] = val
+                next_combos.append(c)
+        combos = next_combos
+
+    expanded: list[dict[str, Any]] = []
+    for scenario in scenarios_raw:
+        if not isinstance(scenario, dict):
+            continue
+        for combo in combos:
+            item = _apply_placeholders(scenario, combo)
+            if isinstance(item, dict):
+                for key, val in combo.items():
+                    item.setdefault(key, val)
+                expanded.append(item)
+    return expanded
+
+
 def run_experiment(
     *,
     root: Path,
@@ -65,7 +114,8 @@ def run_experiment(
     )
 
     rows: list[dict[str, Any]] = []
-    for scenario in manifest["scenarios"]:
+    scenarios = _expand_scenarios(manifest)
+    for scenario in scenarios:
         if not isinstance(scenario, dict):
             raise ValueError("each scenario entry must be an object")
         scenario_name = str(scenario["scenario_name"])
@@ -104,6 +154,8 @@ def run_experiment(
                     "schema_valid": bool(outcome.get("schema_valid", False)),
                     "qa_score": qa_score.get("normalized_score"),
                     "mode": mode,
+                    "stress_level": scenario.get("stress_level"),
+                    "channel": scenario.get("channel"),
                 }
             )
 
@@ -138,6 +190,8 @@ def run_experiment(
                 "schema_valid",
                 "qa_score",
                 "mode",
+                "stress_level",
+                "channel",
             ],
         )
         writer.writeheader()

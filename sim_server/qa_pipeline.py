@@ -20,6 +20,7 @@ def build_qa_input(*, events: list[dict[str, Any]], qa_template: dict[str, Any],
     ]
     tool_calls = [_compact_tool_call(e) for e in events if e.get("event_type") == "tool_call"]
     system_events = [_compact_system_event(e) for e in events if e.get("event_type") == "system"]
+    stress_events = [_compact_stress_event(e) for e in events if e.get("event_type") in {"stressor_applied", "degradation_applied"}]
     call_record = _last_value_call_record(tool_calls)
     normalize, normalize_to = _resolve_normalization(qa_template)
     template_out = dict(qa_template)
@@ -42,8 +43,10 @@ def build_qa_input(*, events: list[dict[str, Any]], qa_template: dict[str, Any],
         "incident": {"type": incident_type},
         "tool_calls": tool_calls,
         "system_events": system_events,
+        "stress_events": stress_events,
         "metrics": {
             "dispatch": _dispatch_metrics(tool_calls),
+            "stress_event_count": len(stress_events),
         },
 }
 
@@ -177,6 +180,19 @@ def _compact_system_event(ev: dict[str, Any]) -> dict[str, Any]:
         "subtype": str(ev.get("subtype", "generic")),
         "text": str(ev.get("text", "")),
     }
+    if ev.get("detail") is not None:
+        out["detail"] = ev.get("detail")
+    return out
+
+
+def _compact_stress_event(ev: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        "event_type": str(ev.get("event_type", "")),
+        "turn": int(ev.get("turn", 0) or 0),
+        "marker": str(ev.get("marker", "")),
+    }
+    if "stress_level" in ev:
+        out["stress_level"] = int(ev.get("stress_level", 0) or 0)
     if ev.get("detail") is not None:
         out["detail"] = ev.get("detail")
     return out

@@ -628,7 +628,9 @@ class OpenAISyntheticCallTakerAgent:
         self.max_completion_tokens = int(cfg.get("max_completion_tokens", 500))
         self.use_previous_response_id = bool(cfg.get("use_previous_response_id", True))
         self.max_history_turns = int(cfg.get("max_history_turns", 20))
+        self.max_tool_rounds = max(0, int(cfg.get("max_tool_rounds", 4)))
         self.enable_map_tool = bool(cfg.get("enable_map_tool", True))
+        self.enable_media_tool = bool(cfg.get("enable_media_tool", True))
         self.checkpoint_strategy = str(cfg.get("checkpoint_strategy", "llm_evaluate")).strip().lower()
         self.opening_greeting = str(
             cfg.get(
@@ -719,12 +721,14 @@ class OpenAISyntheticCallTakerAgent:
                     },
                 )
             turn_packet = self._turn_packet(caller_text, cad_state, system_events, self._pending_checkpoints)
-            kwargs: dict[str, Any] = {
+            base_kwargs: dict[str, Any] = {
                 "model": self.model,
                 "temperature": self.temperature,
                 "max_output_tokens": self.max_completion_tokens,
+                "tools": self._tool_specs(),
             }
             if self.use_previous_response_id and self._seeded and self.previous_response_id:
+                kwargs = dict(base_kwargs)
                 kwargs["previous_response_id"] = self.previous_response_id
                 kwargs["input"] = [{"role": "user", "content": turn_packet}]
             else:
@@ -735,9 +739,42 @@ class OpenAISyntheticCallTakerAgent:
                 if self._history:
                     input_msgs.extend(self._history[-(self.max_history_turns * 2) :])
                 input_msgs.append({"role": "user", "content": turn_packet})
+                kwargs = dict(base_kwargs)
                 kwargs["input"] = input_msgs
 
             resp = self.client.responses.create(**kwargs)
+            for _ in range(self.max_tool_rounds):
+                tool_calls = self._extract_tool_calls(resp)
+                if not tool_calls:
+                    break
+                tool_outputs: list[dict[str, Any]] = []
+                for call in tool_calls:
+                    result = self._exec_tool(
+                        call["name"],
+                        call["args"],
+                        cad_state=cad_state,
+                        system_events=system_events,
+                    )
+                    tool_outputs.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call["call_id"],
+                            "output": json.dumps(result),
+                        }
+                    )
+                if not tool_outputs:
+                    break
+                followup_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "input": tool_outputs,
+                    "temperature": self.temperature,
+                    "max_output_tokens": self.max_completion_tokens,
+                    "tools": self._tool_specs(),
+                }
+                prev_id = str(getattr(resp, "id", "")).strip()
+                if prev_id:
+                    followup_kwargs["previous_response_id"] = prev_id
+                resp = self.client.responses.create(**followup_kwargs)
             response_id = str(getattr(resp, "id", "")).strip()
             self.previous_response_id = response_id or self.previous_response_id
             self._seeded = True
@@ -797,6 +834,7 @@ class OpenAISyntheticCallTakerAgent:
                 "write_cad": "Provide CAD updates in cad_updates object.",
                 "end_call": "Set end_call=true and provide end_reason/end_reason_detail when call should close.",
                 "checkpoints": "Return checkpoint_decisions array when pending checkpoints exist.",
+                "receive_media": "Retrieve structured NG911 media details by media_id if caller references attachment/evidence.",
             },
         }
         return (
@@ -898,6 +936,22 @@ class OpenAISyntheticCallTakerAgent:
             {
                 "type": "function",
                 "function": {
+                    "name": "calltaker.receive_media",
+                    "description": "Retrieve NG911 media artifact details by media_id.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "incident_id": {"type": "string"},
+                            "media_id": {"type": "string"},
+                        },
+                        "required": ["media_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "write_cad",
                     "description": "Queue CAD field updates to apply this turn.",
                     "parameters": {
@@ -970,7 +1024,32 @@ class OpenAISyntheticCallTakerAgent:
                     },
                 }
             )
+        if not self.enable_media_tool:
+            tools = [t for t in tools if str((t.get("function") or {}).get("name", "")) != "calltaker.receive_media"]
         return tools
+
+    def _extract_tool_calls(self, resp: Any) -> list[dict[str, Any]]:
+        calls: list[dict[str, Any]] = []
+        output = getattr(resp, "output", None)
+        if not isinstance(output, list):
+            return calls
+        for item in output:
+            item_type = str(getattr(item, "type", "") or "")
+            if item_type != "function_call":
+                continue
+            name = str(getattr(item, "name", "") or "")
+            call_id = str(getattr(item, "call_id", "") or "")
+            args_raw = str(getattr(item, "arguments", "") or "")
+            if not name or not call_id:
+                continue
+            try:
+                args = json.loads(args_raw) if args_raw else {}
+            except Exception:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            calls.append({"name": name, "call_id": call_id, "args": args})
+        return calls
 
     def _exec_tool(
         self,
@@ -991,6 +1070,32 @@ class OpenAISyntheticCallTakerAgent:
             if section and isinstance(templates, dict):
                 return {"section": section, "template": templates.get(section)}
             return {"templates": templates}
+        if tool_name == "calltaker.receive_media":
+            requested_incident = str(args.get("incident_id", "")).strip()
+            current_incident = str(self.incident_json.get("id", "")).strip()
+            if requested_incident and current_incident and requested_incident != current_incident:
+                return {"error": "incident_id_mismatch", "incident_id": current_incident}
+            media_id = str(args.get("media_id", "")).strip()
+            if not media_id:
+                return {"error": "media_id_required"}
+            media_rows = self.incident_json.get("ng911_media", [])
+            if not isinstance(media_rows, list):
+                media_rows = []
+            for row in media_rows:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("media_id", "")).strip() == media_id:
+                    return {
+                        "incident_id": current_incident,
+                        "media_id": media_id,
+                        "media": {
+                            "type": str(row.get("type", "unknown")),
+                            "description": str(row.get("description", "")),
+                            "valence": str(row.get("valence", "neutral")),
+                            "payload": row.get("payload", {}),
+                        },
+                    }
+            return {"error": "media_not_found", "incident_id": current_incident, "media_id": media_id}
         if tool_name == "view_map":
             loc = self.incident_json.get("location", {}) if isinstance(self.incident_json.get("location"), dict) else {}
             return {

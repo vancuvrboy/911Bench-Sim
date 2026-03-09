@@ -11,7 +11,8 @@
         "people_involved": false,
         "hazards_or_weapons": false
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "911, what is your emergency?",
     "cad_updates": {},
@@ -30,7 +31,8 @@
         "people_involved": false,
         "hazards_or_weapons": false
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Please confirm your exact location and nearest cross street.",
     "cad_updates": {
@@ -54,7 +56,8 @@
         "people_involved": false,
         "hazards_or_weapons": false
       },
-      "progression_note": "Flames spreading"
+      "progression_note": "Flames spreading",
+      "stress_level": 0
     },
     "calltaker_text": "Are there occupants inside, and do you see any hazards or exposures?",
     "cad_updates": {},
@@ -73,7 +76,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Are there occupants inside, and do you see any hazards or exposures?",
     "cad_updates": {},
@@ -92,7 +96,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Stay on the line and keep me updated.",
     "cad_updates": {},
@@ -111,7 +116,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Stay on the line and keep me updated.",
     "cad_updates": {},
@@ -130,7 +136,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Stay on the line and keep me updated.",
     "cad_updates": {},
@@ -149,7 +156,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Stay on the line and keep me updated.",
     "cad_updates": {},
@@ -168,7 +176,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Stay on the line and keep me updated.",
     "cad_updates": {},
@@ -187,7 +196,8 @@
         "people_involved": false,
         "hazards_or_weapons": true
       },
-      "progression_note": null
+      "progression_note": null,
+      "stress_level": 0
     },
     "calltaker_text": "Responders are now with you. We are ending this call.",
     "cad_updates": {},
