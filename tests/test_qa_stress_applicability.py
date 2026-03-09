@@ -64,6 +64,27 @@ class TestQAStressApplicability(unittest.TestCase):
         self.assertEqual(float(out["total_points_possible"]), 10.0)
         self.assertEqual(float(out["normalized_score"]), 100.0)
 
+    def test_openai_normalizer_injects_missing_items(self) -> None:
+        agent = object.__new__(OpenAIQAEvaluatorAgent)
+        agent.qa_template_json = _template()
+        model_obj = {
+            "normalized_score": 0,
+            "incident_type": "FIRE",
+            "items": [
+                {"id": "base_item", "answer": "YES", "points_awarded": 10, "points_possible": 10, "rationale": "ok"},
+            ],
+        }
+        out = agent._normalize_score_payload(
+            model_obj,
+            incident_type="FIRE",
+            qa_input={"stress_events": [{"event_type": "stressor_applied", "stress_level": 3}]},
+        )
+        by_id = {row["id"]: row for row in out["items"]}
+        self.assertIn("stress_item", by_id)
+        self.assertEqual(by_id["stress_item"]["answer"], "NO")
+        self.assertEqual(float(by_id["stress_item"]["points_awarded"]), 0.0)
+        self.assertEqual(float(out["total_points_possible"]), 15.0)
+
 
 if __name__ == "__main__":
     unittest.main()

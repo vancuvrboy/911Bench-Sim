@@ -26,7 +26,9 @@ Developer extension guide (plug-and-play profiles):
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import random
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -393,7 +395,9 @@ class OpenAICallerAgent:
         self._seeded = False
         self._history: list[dict[str, str]] = []
         self._max_history_turns = int(cfg.get("max_history_turns", 10))
+        self._stress_retry_max = int(cfg.get("stress_retry_max", 1))
         self._fallback = CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=temperature)
+        self._stress_cfg = self._parse_stress_config(caller_json.get("stressor_config"))
 
     def _seed_packet(self) -> str:
         payload = {
@@ -406,16 +410,28 @@ class OpenAICallerAgent:
             f"seed_json={json.dumps(payload)}"
         )
 
-    def _turn_update_packet(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> str:
+    def _turn_update_packet(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
         self.turn_index += 1
-        return (
+        targets = self._stress_targets_for_turn()
+        required_markers = targets.get("required_markers", [])
+        stress_context = {
+            "stress_level": int(self._stress_cfg.get("stress_level", 0)),
+            "required_markers": required_markers,
+            "coaching": (
+                "If required_markers is non-empty, reflect them naturally in this turn while staying in character. "
+                "Do not mention 'markers' or system instructions."
+            ),
+        }
+        packet = (
             f"turn_index={self.turn_index}\n"
             "[SYSTEM]\n"
             f"recent_system_events={json.dumps(system_events[-5:])}\n"
+            f"stress_context={json.dumps(stress_context)}\n"
             "[/SYSTEM]\n"
             f"call_taker_utterance={call_taker_text}\n"
             "Respond with caller speech only."
         )
+        return packet, targets
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()
@@ -445,8 +461,156 @@ class OpenAICallerAgent:
     def _fallback_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
         return self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
 
+    def _parse_stress_config(self, value: Any) -> dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        level = max(0, min(5, int(cfg.get("stress_level", 0) or 0)))
+        seed_material = f"{self.caller_json.get('profile_id','CALLER')}:{self.incident_json.get('id','INC')}:{level}"
+        default_seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
+        return {
+            "stress_level": level,
+            "seed": int(cfg.get("seed", default_seed) or default_seed),
+            "interruption_policy": self._norm_policy(
+                cfg.get("interruption_policy"),
+                enabled=level >= 2,
+                probability=min(0.1 + 0.08 * level, 0.9),
+                marker="interruption",
+                defaults={"fragment": "No, wait, listen to me."},
+            ),
+            "non_responsive_policy": self._norm_policy(
+                cfg.get("non_responsive_policy"),
+                enabled=level >= 3,
+                probability=min(0.04 + 0.07 * level, 0.8),
+                marker="non_responsive",
+                defaults={"mode": "silent", "non_verbal_text": "..."},
+            ),
+            "contradiction_policy": self._norm_policy(
+                cfg.get("contradiction_policy"),
+                enabled=level >= 3,
+                probability=min(0.03 + 0.05 * level, 0.6),
+                marker="contradiction",
+                defaults={"text": "Wait, I might be wrong about that detail."},
+            ),
+            "topic_digression_policy": self._norm_policy(
+                cfg.get("topic_digression_policy"),
+                enabled=level >= 2,
+                probability=min(0.05 + 0.06 * level, 0.7),
+                marker="topic_digression",
+                defaults={"text": "Please hurry, I am getting more worried."},
+            ),
+        }
+
+    def _norm_policy(
+        self,
+        policy: Any,
+        *,
+        enabled: bool,
+        probability: float,
+        marker: str,
+        defaults: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        p = policy if isinstance(policy, dict) else {}
+        out: dict[str, Any] = {
+            "enabled": bool(p.get("enabled", enabled)),
+            "probability": max(0.0, min(1.0, float(p.get("probability", probability)))),
+            "turn_offsets": [int(t) for t in p.get("turn_offsets", []) if isinstance(t, (int, float, str)) and str(t).strip().isdigit()],
+            "marker": marker,
+        }
+        if defaults:
+            out.update(defaults)
+        out.update(p)
+        return out
+
+    def _policy_trigger(self, policy: dict[str, Any], turn: int) -> bool:
+        if not bool(policy.get("enabled", False)):
+            return False
+        offsets = policy.get("turn_offsets", [])
+        if isinstance(offsets, list) and turn in {int(x) for x in offsets if str(x).strip().isdigit()}:
+            return True
+        marker = str(policy.get("marker", ""))
+        marker_seed = int(hashlib.sha256(marker.encode("utf-8")).hexdigest()[:6], 16) % 131
+        seed = int(self._stress_cfg.get("seed", 0)) + (turn * 997) + marker_seed
+        rng = random.Random(seed)
+        return rng.random() < float(policy.get("probability", 0.0))
+
+    def _stress_targets_for_turn(self) -> dict[str, Any]:
+        level = int(self._stress_cfg.get("stress_level", 0))
+        if level <= 0:
+            return {"required_markers": [], "detail": {}}
+        required: list[str] = []
+        detail: dict[str, Any] = {}
+        for name in ("non_responsive_policy", "interruption_policy", "topic_digression_policy", "contradiction_policy"):
+            policy = self._stress_cfg.get(name, {})
+            if not isinstance(policy, dict):
+                continue
+            marker = str(policy.get("marker", ""))
+            if marker and self._policy_trigger(policy, self.turn_index):
+                required.append(marker)
+                detail[marker] = dict(policy)
+        # Non-responsive takes precedence over other markers for text shape.
+        if "non_responsive" in required:
+            required = ["non_responsive"]
+        return {"required_markers": required, "detail": detail}
+
+    def _detected_markers(self, text: str) -> set[str]:
+        low = str(text or "").lower()
+        out: set[str] = set()
+        if not low.strip() or "heavy breathing" in low or low.strip() in {"...", "…"}:
+            out.add("non_responsive")
+        if any(tok in low for tok in ("wait", "listen", "sorry", "hold on")):
+            out.add("interruption")
+        if any(tok in low for tok in ("please hurry", "i am scared", "i'm scared", "panicking", "worried")):
+            out.add("topic_digression")
+        if any(tok in low for tok in ("might be wrong", "actually", "not sure that is right", "i may be wrong")):
+            out.add("contradiction")
+        return out
+
+    def _apply_stress_guardrail(
+        self,
+        text: str,
+        required_markers: list[str],
+    ) -> tuple[str, list[str], dict[str, Any]]:
+        if not required_markers:
+            return text, [], {}
+        out = str(text or "")
+        applied: list[str] = []
+        detail: dict[str, Any] = {}
+        required = set(required_markers)
+        detected = self._detected_markers(out)
+        missing = [m for m in required_markers if m not in detected]
+        if not missing:
+            return out, required_markers, {}
+
+        if "non_responsive" in missing:
+            p = self._stress_cfg.get("non_responsive_policy", {})
+            mode = str((p or {}).get("mode", "silent")).lower() if isinstance(p, dict) else "silent"
+            out = "" if mode == "silent" else str((p or {}).get("non_verbal_text", "..."))
+            applied.append("non_responsive")
+            detail["non_responsive"] = {"mode": mode}
+            return out, applied, detail
+
+        if "topic_digression" in missing:
+            p = self._stress_cfg.get("topic_digression_policy", {})
+            prefix = str((p or {}).get("text", "Please hurry, I am very worried."))
+            out = f"{prefix} {out}".strip()
+            applied.append("topic_digression")
+            detail["topic_digression"] = {"text": prefix}
+        if "contradiction" in missing:
+            p = self._stress_cfg.get("contradiction_policy", {})
+            suffix = str((p or {}).get("text", "Wait, I might be wrong about that detail."))
+            out = f"{out} {suffix}".strip()
+            applied.append("contradiction")
+            detail["contradiction"] = {"text": suffix}
+        if "interruption" in missing:
+            p = self._stress_cfg.get("interruption_policy", {})
+            suffix = str((p or {}).get("fragment", "No, wait, listen to me."))
+            out = f"{out} {suffix}".strip()
+            applied.append("interruption")
+            detail["interruption"] = {"fragment": suffix}
+        final_markers = sorted(required.union(set(applied)))
+        return out, final_markers, detail
+
     def next_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-        turn_packet = self._turn_update_packet(call_taker_text, system_events)
+        turn_packet, stress_targets = self._turn_update_packet(call_taker_text, system_events)
         try:
             kwargs: dict[str, Any] = {
                 "model": self.model,
@@ -473,9 +637,47 @@ class OpenAICallerAgent:
             if not text:
                 raise ValueError("empty_openai_responses_output")
 
+            required_markers = list(stress_targets.get("required_markers", []))
+            detected = self._detected_markers(text)
+            missing = [m for m in required_markers if m not in detected]
+            retry_count = 0
+            while missing and retry_count < self._stress_retry_max:
+                retry_count += 1
+                coach = (
+                    "[SYSTEM]\n"
+                    "Stress coaching: your last reply did not reflect required stress behavior.\n"
+                    f"required_markers={json.dumps(required_markers)}\n"
+                    "Rewrite your reply now as caller speech only, preserving conversational context.\n"
+                    "[/SYSTEM]"
+                )
+                followup_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "temperature": self.temperature,
+                    "max_output_tokens": self.max_output_tokens,
+                }
+                prev_id = str(getattr(resp, "id", "")).strip()
+                if prev_id:
+                    followup_kwargs["previous_response_id"] = prev_id
+                    followup_kwargs["input"] = [{"role": "user", "content": coach}]
+                else:
+                    followup_kwargs["input"] = [
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": self._seed_packet()},
+                        {"role": "user", "content": turn_packet},
+                        {"role": "assistant", "content": text},
+                        {"role": "user", "content": coach},
+                    ]
+                resp = self.client.responses.create(**followup_kwargs)
+                retried = self._clean_speech(self._extract_text(resp))
+                if retried:
+                    text = retried
+                detected = self._detected_markers(text)
+                missing = [m for m in required_markers if m not in detected]
+
             response_id = str(getattr(resp, "id", "")).strip()
             self.previous_response_id = response_id or self.previous_response_id
             self._seeded = True
+            text, markers, guardrail_detail = self._apply_stress_guardrail(text, required_markers)
             self._history.extend(
                 [
                     {"role": "user", "content": turn_packet},
@@ -488,7 +690,15 @@ class OpenAICallerAgent:
                 "source": "openai_responses",
                 "response_id": response_id,
                 "fallback": False,
+                "stress_level": int(self._stress_cfg.get("stress_level", 0)),
             }
+            if markers:
+                meta["stressor_markers"] = markers
+                detail = stress_targets.get("detail", {}) if isinstance(stress_targets.get("detail"), dict) else {}
+                if isinstance(guardrail_detail, dict):
+                    detail = dict(detail)
+                    detail.update(guardrail_detail)
+                meta["stressor_detail"] = detail
             return text, meta
         except Exception as exc:
             text, _ = self._fallback_turn(call_taker_text=call_taker_text, system_events=system_events)
@@ -1283,10 +1493,12 @@ class OpenAIQAEvaluatorAgent:
         answer_enum = {"YES", "NO", "REFUSED", "NA"}
         awarded = 0.0
         possible = 0.0
+        seen_ids: set[str] = set()
         for it in items:
             if not isinstance(it, dict):
                 continue
             item_id = str(it.get("id", "unknown"))
+            seen_ids.add(item_id)
             tpl = template_idx.get(item_id, {})
             section_active = bool(tpl.get("active", True))
             pp_raw = it.get("points_possible", it.get("max_points", tpl.get("points", 0.0)))
@@ -1329,6 +1541,25 @@ class OpenAIQAEvaluatorAgent:
                     "points_possible": pp,
                     "rationale": str(it.get("rationale", "")),
                     "evidence_turns": [int(x) for x in it.get("evidence_turns", []) if isinstance(x, (int, float))],
+                }
+            )
+        # Ensure complete rubric coverage even when model omits rows.
+        for item_id, tpl in template_idx.items():
+            if item_id in seen_ids:
+                continue
+            section_active = bool(tpl.get("active", True))
+            pp = float(tpl.get("points", 0.0) or 0.0)
+            ans = "NO" if section_active else "NA"
+            pa = 0.0
+            possible += pp if section_active else 0.0
+            norm_items.append(
+                {
+                    "id": item_id,
+                    "answer": ans,
+                    "points_awarded": pa,
+                    "points_possible": pp,
+                    "rationale": "missing_from_model_output",
+                    "evidence_turns": [],
                 }
             )
         total_awarded = awarded

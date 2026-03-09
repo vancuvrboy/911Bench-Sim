@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from agents.caller_agent import CallerAgent
+from agents.provider import OpenAICallerAgent
 from sim_server import SimulationEngine
 from sim_server.errors import ValidationError
 from sim_server.schema_utils import load_json, validate_seed_triplet
@@ -150,6 +151,29 @@ class TestCallerStressBehavior(unittest.TestCase):
         qa_template = {"templates": {"COMMON": {"sections": []}}}
         with self.assertRaises(ValidationError):
             validate_seed_triplet(caller, incident, qa_template)
+
+    def test_openai_caller_guardrail_applies_missing_markers(self) -> None:
+        agent = object.__new__(OpenAICallerAgent)
+        agent.caller_json = _caller_seed()
+        agent.incident_json = _incident_seed()
+        agent.turn_index = 2
+        agent._stress_cfg = {
+            "stress_level": 3,
+            "seed": 313,
+            "interruption_policy": {"marker": "interruption", "fragment": "No, wait, listen to me."},
+            "non_responsive_policy": {"marker": "non_responsive", "mode": "non_verbal", "non_verbal_text": "...heavy breathing..."},
+            "contradiction_policy": {"marker": "contradiction", "text": "Wait, I might be wrong about that detail."},
+            "topic_digression_policy": {"marker": "topic_digression", "text": "Please hurry, I am getting more worried."},
+        }
+        text, markers, detail = agent._apply_stress_guardrail(
+            "There is smoke in the hallway.",
+            ["interruption", "topic_digression"],
+        )
+        self.assertIn("No, wait, listen to me.", text)
+        self.assertIn("Please hurry, I am getting more worried.", text)
+        self.assertIn("interruption", markers)
+        self.assertIn("topic_digression", markers)
+        self.assertIn("interruption", detail)
 
 
 if __name__ == "__main__":
