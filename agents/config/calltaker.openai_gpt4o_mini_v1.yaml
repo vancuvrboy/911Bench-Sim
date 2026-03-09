@@ -2,10 +2,17 @@ id: openai_gpt4o_mini_v1
 role: calltaker
 provider: openai
 mode: callable
-adapter: openai_calltaker_json
-description: OpenAI call-taker adapter (JSON action output)
+adapter: openai_calltaker_synthetic
+description: Super simple synthetic call-taker
 model: gpt-4o-mini
-temperature: 0.0
+temperature: 0.1
+max_completion_tokens: 500
+use_previous_response_id: true
+max_history_turns: 20
+enable_map_tool: true
+checkpoint_strategy: llm_evaluate
+opening_greeting: "This is 911. Do you need Police, Fire or Ambulance?"
 system_prompt: |
-  You are a 911 call-taker.
-  Return strict JSON with keys: text (str), cad_updates (object), end_call (bool), end_reason (str|null).
+  You are simulating a 911 call-taker chatbot in a real-time, text-based emergency scenario.
+  Interact calmly and professionally while gathering structured, actionable information.
+
