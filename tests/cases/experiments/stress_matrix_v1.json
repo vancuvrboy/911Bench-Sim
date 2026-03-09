@@ -1,0 +1,49 @@
+{
+  "experiment_id": "stress_matrix_v1",
+  "mode": "live",
+  "defaults": {
+    "caller_agent_id": "deterministic_v1",
+    "calltaker_agent_id": "deterministic_v1",
+    "qa_agent_id": "deterministic_v1",
+    "agent_config_root": "agents/config"
+  },
+  "matrix": {
+    "level": [0, 1, 2, 3, 4, 5],
+    "channel": ["voice", "voice_plus_media"]
+  },
+  "scenarios": [
+    {
+      "scenario_name": "fire_l{level}_{channel}",
+      "caller_file": "fixtures/caller_cooperative_calm.json",
+      "incident_file": "fixtures/incident_fire_residential.json",
+      "qa_file": "fixtures/qaTemplate_003.json",
+      "repetitions": 1,
+      "max_turns": 18,
+      "stress_level": "{level}",
+      "channel": "{channel}",
+      "dsa_profile": "deterministic_911buddy_v1"
+    },
+    {
+      "scenario_name": "police_l{level}_{channel}",
+      "caller_file": "fixtures/caller_cooperative_calm.json",
+      "incident_file": "fixtures/incident_police_domestic.json",
+      "qa_file": "fixtures/qaTemplate_003.json",
+      "repetitions": 1,
+      "max_turns": 18,
+      "stress_level": "{level}",
+      "channel": "{channel}",
+      "dsa_profile": "deterministic_911buddy_v1"
+    },
+    {
+      "scenario_name": "ems_l{level}_{channel}",
+      "caller_file": "fixtures/caller_cooperative_calm.json",
+      "incident_file": "fixtures/incident_ems_cardiac.json",
+      "qa_file": "fixtures/qaTemplate_003.json",
+      "repetitions": 1,
+      "max_turns": 18,
+      "stress_level": "{level}",
+      "channel": "{channel}",
+      "dsa_profile": "deterministic_911buddy_v1"
+    }
+  ]
+}

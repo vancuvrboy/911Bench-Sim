@@ -47,6 +47,16 @@ def _normalize_events_for_replay(events: list[dict[str, Any]]) -> list[dict[str,
     return cleaned
 
 
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = json.loads(json.dumps(base))
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 class SimEpisodeRunner:
     def __init__(
         self,
@@ -76,9 +86,15 @@ class SimEpisodeRunner:
         calltaker_agent_id: str = "deterministic_v1",
         qa_agent_id: str = "deterministic_v1",
         agent_config_root: str | Path | None = None,
+        caller_override: dict[str, Any] | None = None,
+        incident_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         caller = load_json(self.root / caller_file)
         incident = load_json(self.root / incident_file)
+        if isinstance(caller_override, dict) and caller_override:
+            caller = _deep_merge(caller, caller_override)
+        if isinstance(incident_override, dict) and incident_override:
+            incident = _deep_merge(incident, incident_override)
         incident = json.loads(json.dumps(incident))
         incident["max_turns"] = max_turns
         qa_template = load_json(self.root / qa_file)

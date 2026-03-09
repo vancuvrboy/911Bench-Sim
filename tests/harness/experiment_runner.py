@@ -83,6 +83,49 @@ def _expand_scenarios(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return expanded
 
 
+def _scenario_seed_overrides(scenario: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    caller_override: dict[str, Any] = {}
+    incident_override: dict[str, Any] = {}
+
+    stress_raw = scenario.get("stress_level")
+    stress_level: int | None = None
+    if stress_raw is not None and str(stress_raw).strip() != "":
+        try:
+            stress_level = max(0, min(5, int(stress_raw)))
+        except Exception:
+            stress_level = None
+    if stress_level is not None:
+        caller_override["stressor_config"] = {
+            "stress_level": stress_level,
+            "seed": int(scenario.get("stressor_seed", stress_level + 100)),
+        }
+        incident_override["calltaker_degradation_config"] = {
+            "enabled": bool(scenario.get("degradation_enabled", stress_level > 0)),
+            "stress_level": stress_level,
+            "degradation_seed": int(scenario.get("degradation_seed", stress_level + 200)),
+            "omission_probability": float(scenario.get("omission_probability", min(0.05 * stress_level, 0.6))),
+            "verification_skip_probability": float(
+                scenario.get("verification_skip_probability", min(0.04 * stress_level, 0.5))
+            ),
+            "dispatch_delay_probability": float(scenario.get("dispatch_delay_probability", min(0.03 * stress_level, 0.4))),
+            "dispatch_delay_turns": int(scenario.get("dispatch_delay_turns", 1 if stress_level <= 2 else 2)),
+        }
+
+    channel = str(scenario.get("channel", "")).strip().lower()
+    if channel in {"voice_plus_media", "multimodal", "media"}:
+        incident_override["ng911_media"] = [
+            {
+                "media_id": "auto-media-1",
+                "type": "image",
+                "description": "Auto-generated stress experiment media sample (flame/smoke scene).",
+                "valence": "high_risk",
+                "payload": {"smoke_density": "high", "visible_flames": True},
+            }
+        ]
+
+    return caller_override, incident_override
+
+
 def run_experiment(
     *,
     root: Path,
@@ -125,6 +168,7 @@ def run_experiment(
 
         for rep in range(1, repetitions + 1):
             run_name = f"{scenario_name}-r{rep}" if repetitions > 1 else scenario_name
+            caller_override, incident_override = _scenario_seed_overrides(scenario)
             outcome = runner.run_episode(
                 run_name,
                 str(scenario["caller_file"]),
@@ -137,6 +181,8 @@ def run_experiment(
                 calltaker_agent_id=str(scenario.get("calltaker_agent_id", default_calltaker_agent_id)),
                 qa_agent_id=str(scenario.get("qa_agent_id", default_qa_agent_id)),
                 agent_config_root=_resolve_path(root, str(scenario.get("agent_config_root", default_agent_config_root))),
+                caller_override=caller_override,
+                incident_override=incident_override,
             )
             qa_score = outcome.get("qa_score") or {}
             rows.append(
