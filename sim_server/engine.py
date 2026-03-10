@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import random
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,11 +71,6 @@ class Episode:
     events: list[dict[str, Any]] = field(default_factory=list)
     sealed_artifacts: dict[str, Any] = field(default_factory=dict)
     checkpoints: dict[str, CheckpointRequest] = field(default_factory=dict)
-    degradation_cfg: dict[str, Any] = field(default_factory=dict)
-    degradation_rng_seed: int = 0
-    cumulative_stress_load: int = 0
-    deferred_dispatch_turns: int = 0
-    sim_time_ms: int = 0
 
 
 class SimulationEngine:
@@ -114,13 +108,7 @@ class SimulationEngine:
             agent_config_snapshot=self._normalize_agent_config_snapshot(agent_config_snapshot),
             first_responder_delay=int(incident_json.get("first_responder_delay", 8)),
             max_turns=int(incident_json.get("max_turns", 30)),
-            degradation_cfg=self._normalize_degradation_config(
-                incident_id=incident_id,
-                caller_json=caller_json,
-                config=incident_json.get("calltaker_degradation_config", {}),
-            ),
         )
-        ep.degradation_rng_seed = int(ep.degradation_cfg.get("degradation_seed", 0))
         self._episodes[incident_id] = ep
         return {"incident_id": incident_id, "status": "loaded"}
 
@@ -148,8 +136,6 @@ class SimulationEngine:
                 "qa_template_id": ep.qa_template_id,
                 "schema_version": "events.v4",
                 "agent_config": self._normalize_agent_config_snapshot(ep.agent_config_snapshot),
-                "stress_config": ep.caller_json.get("stressor_config", {}),
-                "degradation_config": ep.degradation_cfg,
             },
         )
         return {"status": "running", "episode_ts": ep.start_ts}
@@ -173,14 +159,8 @@ class SimulationEngine:
         self._assert_not_sealed(ep)
 
         turn = ep.awaiting_caller_for_turn
-        sanitized = self._sanitize_caller_metadata(metadata)
-        existing_text = str(ep.pending_caller_text or "")
-        if existing_text and self._is_interruption_followup(sanitized):
-            ep.pending_caller_text = f"{existing_text}\n{text}".strip()
-            ep.pending_caller_metadata = self._merge_caller_metadata(ep.pending_caller_metadata, sanitized)
-        else:
-            ep.pending_caller_text = text
-            ep.pending_caller_metadata = sanitized
+        ep.pending_caller_text = text
+        ep.pending_caller_metadata = self._sanitize_caller_metadata(metadata)
 
         return {"turn": turn, "ts": _iso_now(), "status": "accepted"}
 
@@ -201,14 +181,6 @@ class SimulationEngine:
         ep.pending_caller_text = ""
         ep.pending_caller_metadata = None
 
-        adjusted_text, adjusted_updates, degradation_events = self._apply_degradation(
-            ep=ep,
-            turn=turn,
-            text=text,
-            cad_updates=cad_updates or {},
-            caller_metadata=caller_metadata,
-        )
-
         ep.current_turn = turn
         self._append_event(
             ep,
@@ -216,47 +188,17 @@ class SimulationEngine:
                 "event_type": "conversation",
                 "incident_id": ep.incident_id,
                 "turn": turn,
-                "call_taker": adjusted_text,
+                "call_taker": text,
                 "caller": caller_text,
                 "caller_metadata": caller_metadata,
                 "call_taker_metadata": ct_metadata,
             },
         )
-        if not str(caller_text or "").strip():
-            self._append_system(ep, subtype="silent_turn", text="Caller provided no verbal content this turn.")
-        if isinstance(caller_metadata, dict):
-            markers = caller_metadata.get("stressor_markers")
-            if isinstance(markers, list):
-                stress_level = int(caller_metadata.get("stress_level", 0) or 0)
-                stress_detail = caller_metadata.get("stressor_detail", {})
-                for marker in markers:
-                    self._append_event(
-                        ep,
-                        {
-                            "event_type": "stressor_applied",
-                            "incident_id": ep.incident_id,
-                            "turn": turn,
-                            "marker": str(marker),
-                            "stress_level": stress_level,
-                            "detail": stress_detail.get(str(marker)) if isinstance(stress_detail, dict) else None,
-                        },
-                    )
-        for marker, detail in degradation_events:
-            self._append_event(
-                ep,
-                {
-                    "event_type": "degradation_applied",
-                    "incident_id": ep.incident_id,
-                    "turn": turn,
-                    "marker": marker,
-                    "detail": detail,
-                },
-            )
         ep.awaiting_caller_for_turn += 1
 
         cad_update_result = None
-        if adjusted_updates:
-            cad_update_result = self._apply_tool_call_update(ep, adjusted_updates)
+        if cad_updates:
+            cad_update_result = self._apply_tool_call_update(ep, cad_updates)
 
         self._on_turn_progress(ep)
         return {
@@ -825,22 +767,6 @@ class SimulationEngine:
             )
 
     def _on_turn_progress(self, ep: Episode) -> None:
-        if ep.deferred_dispatch_turns > 0:
-            ep.deferred_dispatch_turns -= 1
-            if ep.deferred_dispatch_turns == 0 and not ep.dispatch_triggered:
-                self._apply_patch(ep, {"dispatch_triggered": True})
-                self._dispatch_detection_on_write(ep, {"dispatch_triggered": True})
-                self._append_event(
-                    ep,
-                    {
-                        "event_type": "degradation_applied",
-                        "incident_id": ep.incident_id,
-                        "turn": ep.current_turn,
-                        "marker": "dispatch_delay_released",
-                        "detail": {"dispatch_triggered": True},
-                    },
-                )
-
         if ep.current_turn >= ep.max_turns:
             self._append_system(ep, subtype="max_turns_reached", text="Maximum turns reached.")
             self._seal_episode(ep, reason="max_turns")
@@ -884,66 +810,13 @@ class SimulationEngine:
     def _sanitize_caller_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(metadata, dict):
             return None
-        allowed_keys = {
-            "agent_profile_id",
-            "source",
-            "response_id",
-            "fallback",
-            "error_code",
-            "stress_level",
-            "stressor_markers",
-            "stressor_detail",
-            "emotional_state",
-            "disclosure_tracker",
-            "progression_note",
-        }
+        allowed_keys = {"agent_profile_id", "source", "response_id", "fallback", "error_code"}
         cleaned = {k: metadata[k] for k in allowed_keys if k in metadata}
         if not cleaned:
             return None
         if "fallback" in cleaned:
             cleaned["fallback"] = bool(cleaned["fallback"])
-        if "stress_level" in cleaned:
-            cleaned["stress_level"] = max(0, min(5, int(cleaned["stress_level"])))
-        if "stressor_markers" in cleaned and isinstance(cleaned["stressor_markers"], list):
-            cleaned["stressor_markers"] = [str(item) for item in cleaned["stressor_markers"]]
         return cleaned
-
-    def _merge_caller_metadata(
-        self,
-        base: dict[str, Any] | None,
-        extra: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if not isinstance(base, dict):
-            return extra
-        if not isinstance(extra, dict):
-            return base
-        out = dict(base)
-        for key, value in extra.items():
-            if key == "stressor_markers":
-                merged = list(out.get(key, [])) if isinstance(out.get(key), list) else []
-                if isinstance(value, list):
-                    for marker in value:
-                        marker_s = str(marker)
-                        if marker_s not in merged:
-                            merged.append(marker_s)
-                out[key] = merged
-                continue
-            if key == "stressor_detail" and isinstance(value, dict):
-                detail = dict(out.get(key, {})) if isinstance(out.get(key), dict) else {}
-                detail.update(value)
-                out[key] = detail
-                continue
-            out[key] = value
-        return out
-
-    def _is_interruption_followup(self, metadata: dict[str, Any] | None) -> bool:
-        if not isinstance(metadata, dict):
-            return False
-        markers = metadata.get("stressor_markers")
-        if not isinstance(markers, list):
-            return False
-        marker_set = {str(m) for m in markers}
-        return "interruption" in marker_set
 
     def _sanitize_call_taker_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(metadata, dict):
@@ -996,126 +869,6 @@ class SimulationEngine:
         helper = snapshot.get("helper_agent")
         out["helper_agent"] = helper if isinstance(helper, dict) else None
         return out
-
-    def _normalize_degradation_config(self, *, incident_id: str, caller_json: dict[str, Any], config: Any) -> dict[str, Any]:
-        cfg = config if isinstance(config, dict) else {}
-        caller_stress = int((caller_json.get("stressor_config", {}) or {}).get("stress_level", 0) or 0)
-        seed_material = f"{incident_id}:degradation"
-        default_seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
-        return {
-            "enabled": bool(cfg.get("enabled", False)),
-            "stress_level": max(0, min(5, int(cfg.get("stress_level", caller_stress) or caller_stress))),
-            "degradation_seed": int(cfg.get("degradation_seed", default_seed) or default_seed),
-            "omission_probability": max(0.0, min(1.0, float(cfg.get("omission_probability", 0.0)))),
-            "verification_skip_probability": max(0.0, min(1.0, float(cfg.get("verification_skip_probability", 0.0)))),
-            "dispatch_delay_probability": max(0.0, min(1.0, float(cfg.get("dispatch_delay_probability", 0.0)))),
-            "dispatch_delay_turns": max(1, int(cfg.get("dispatch_delay_turns", 1))),
-            "load_threshold": max(1, int(cfg.get("load_threshold", 4))),
-            "turn_time_budget_ms": max(0, int(cfg.get("turn_time_budget_ms", 0))),
-            "base_turn_cost_ms": max(0, int(cfg.get("base_turn_cost_ms", 2500))),
-            "cad_field_cost_ms": max(0, int(cfg.get("cad_field_cost_ms", 900))),
-            "interruption_penalty_ms": max(0, int(cfg.get("interruption_penalty_ms", 1200))),
-            "nonresponsive_penalty_ms": max(0, int(cfg.get("nonresponsive_penalty_ms", 1500))),
-            "load_increments": {
-                "interruption": int(cfg.get("load_increments", {}).get("interruption", 1))
-                if isinstance(cfg.get("load_increments"), dict)
-                else 1,
-                "non_responsive": int(cfg.get("load_increments", {}).get("non_responsive", 1))
-                if isinstance(cfg.get("load_increments"), dict)
-                else 1,
-                "topic_digression": int(cfg.get("load_increments", {}).get("topic_digression", 1))
-                if isinstance(cfg.get("load_increments"), dict)
-                else 1,
-                "contradiction": int(cfg.get("load_increments", {}).get("contradiction", 2))
-                if isinstance(cfg.get("load_increments"), dict)
-                else 2,
-            },
-        }
-
-    def _apply_degradation(
-        self,
-        *,
-        ep: Episode,
-        turn: int,
-        text: str,
-        cad_updates: dict[str, Any],
-        caller_metadata: dict[str, Any] | None,
-    ) -> tuple[str, dict[str, Any], list[tuple[str, dict[str, Any]]]]:
-        cfg = ep.degradation_cfg or {}
-        if not bool(cfg.get("enabled", False)):
-            return text, cad_updates, []
-
-        rng = random.Random(ep.degradation_rng_seed + turn)
-        markers: list[tuple[str, dict[str, Any]]] = []
-        out_updates = dict(cad_updates)
-        out_text = str(text)
-
-        load_increments = cfg.get("load_increments", {}) if isinstance(cfg.get("load_increments"), dict) else {}
-        if isinstance(caller_metadata, dict):
-            for marker in caller_metadata.get("stressor_markers", []) or []:
-                ep.cumulative_stress_load += int(load_increments.get(str(marker), 0))
-
-        threshold = int(cfg.get("load_threshold", 4))
-        multiplier = 1.0 if ep.cumulative_stress_load < threshold else 1.5
-
-        markers_present = set()
-        if isinstance(caller_metadata, dict):
-            raw = caller_metadata.get("stressor_markers")
-            if isinstance(raw, list):
-                markers_present = {str(x) for x in raw}
-        turn_budget_ms = int(cfg.get("turn_time_budget_ms", 0))
-        if turn_budget_ms > 0:
-            base_cost = int(cfg.get("base_turn_cost_ms", 2500))
-            cad_cost = int(cfg.get("cad_field_cost_ms", 900)) * len(out_updates)
-            int_penalty = int(cfg.get("interruption_penalty_ms", 1200)) * (1 if "interruption" in markers_present else 0)
-            nonresp_penalty = int(cfg.get("nonresponsive_penalty_ms", 1500)) * (1 if "non_responsive" in markers_present else 0)
-            estimated_ms = base_cost + cad_cost + int_penalty + nonresp_penalty
-            ep.sim_time_ms += estimated_ms
-            if estimated_ms > turn_budget_ms:
-                markers.append(
-                    (
-                        "time_pressure",
-                        {
-                            "estimated_turn_cost_ms": estimated_ms,
-                            "turn_budget_ms": turn_budget_ms,
-                            "cad_field_count": len(out_updates),
-                        },
-                    )
-                )
-                # Under time pressure, raise degradation likelihood.
-                multiplier *= 1.35
-
-        om_prob = min(1.0, float(cfg.get("omission_probability", 0.0)) * multiplier)
-        if out_updates and rng.random() < om_prob:
-            keys = sorted(k for k in out_updates.keys() if k != "dispatch_triggered")
-            if not keys:
-                keys = sorted(out_updates.keys())
-            dropped = keys[0] if keys else None
-            if dropped is not None:
-                out_updates.pop(dropped, None)
-                markers.append(("omission_injected", {"dropped_field": dropped, "stress_load": ep.cumulative_stress_load}))
-
-        ver_prob = min(1.0, float(cfg.get("verification_skip_probability", 0.0)) * multiplier)
-        if rng.random() < ver_prob:
-            markers.append(("verification_skipped", {"stress_load": ep.cumulative_stress_load}))
-
-        delay_prob = min(1.0, float(cfg.get("dispatch_delay_probability", 0.0)) * multiplier)
-        if bool(out_updates.get("dispatch_triggered")) and rng.random() < delay_prob:
-            out_updates["dispatch_triggered"] = False
-            # +1 because _on_turn_progress runs at the end of the current turn.
-            ep.deferred_dispatch_turns = int(cfg.get("dispatch_delay_turns", 1)) + 1
-            markers.append(
-                (
-                    "dispatch_delay_injected",
-                    {"delay_turns": int(cfg.get("dispatch_delay_turns", 1)), "stress_load": ep.cumulative_stress_load},
-                )
-            )
-
-        if markers and len(out_text.strip()) > 0 and rng.random() < 0.15:
-            out_text = f"{out_text} Let me quickly verify that."
-            markers.append(("question_order_perturbed", {"mode": "suffix_rephrase"}))
-
-        return out_text, out_updates, markers
 
     def _is_timed_out(self, req: CheckpointRequest) -> bool:
         now = dt.datetime.now(dt.timezone.utc)

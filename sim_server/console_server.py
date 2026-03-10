@@ -548,26 +548,6 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
                 queued_caller_turns += 1
                 last_queued_caller_text = caller_text
-                # Optional extra caller interjection before call-taker responds.
-                if (
-                    not caller_replay
-                    and not calltaker_manual
-                    and isinstance(caller_meta, dict)
-                    and isinstance(caller_meta.get("stressor_markers"), list)
-                    and "interruption" in {str(m) for m in caller_meta.get("stressor_markers", [])}
-                    and self.app.caller_agent is not None
-                ):
-                    interjection_text, interjection_meta = self.app.caller_agent.next_turn(
-                        call_taker_text=ct_input,
-                        system_events=system_events,
-                    )
-                    self.app.engine.caller_post_turn(
-                        incident_id=incident_id,
-                        text=interjection_text,
-                        metadata=interjection_meta,
-                    )
-                    queued_caller_turns += 1
-                    last_queued_caller_text = interjection_text
             if not calltaker_manual:
                 self.app.engine.calltaker_post_turn(
                     incident_id=incident_id,

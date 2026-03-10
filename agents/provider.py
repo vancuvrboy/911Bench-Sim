@@ -26,9 +26,7 @@ Developer extension guide (plug-and-play profiles):
 from __future__ import annotations
 
 import json
-import hashlib
 import os
-import random
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -395,9 +393,7 @@ class OpenAICallerAgent:
         self._seeded = False
         self._history: list[dict[str, str]] = []
         self._max_history_turns = int(cfg.get("max_history_turns", 10))
-        self._stress_retry_max = int(cfg.get("stress_retry_max", 1))
         self._fallback = CallerAgent(caller_json=caller_json, incident_json=incident_json, temperature=temperature)
-        self._stress_cfg = self._parse_stress_config(caller_json.get("stressor_config"))
 
     def _seed_packet(self) -> str:
         payload = {
@@ -410,28 +406,16 @@ class OpenAICallerAgent:
             f"seed_json={json.dumps(payload)}"
         )
 
-    def _turn_update_packet(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    def _turn_update_packet(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> str:
         self.turn_index += 1
-        targets = self._stress_targets_for_turn()
-        required_markers = targets.get("required_markers", [])
-        stress_context = {
-            "stress_level": int(self._stress_cfg.get("stress_level", 0)),
-            "required_markers": required_markers,
-            "coaching": (
-                "If required_markers is non-empty, reflect them naturally in this turn while staying in character. "
-                "Do not mention 'markers' or system instructions."
-            ),
-        }
-        packet = (
+        return (
             f"turn_index={self.turn_index}\n"
             "[SYSTEM]\n"
             f"recent_system_events={json.dumps(system_events[-5:])}\n"
-            f"stress_context={json.dumps(stress_context)}\n"
             "[/SYSTEM]\n"
             f"call_taker_utterance={call_taker_text}\n"
             "Respond with caller speech only."
         )
-        return packet, targets
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()
@@ -461,156 +445,8 @@ class OpenAICallerAgent:
     def _fallback_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
         return self._fallback.next_turn(call_taker_text=call_taker_text, system_events=system_events)
 
-    def _parse_stress_config(self, value: Any) -> dict[str, Any]:
-        cfg = value if isinstance(value, dict) else {}
-        level = max(0, min(5, int(cfg.get("stress_level", 0) or 0)))
-        seed_material = f"{self.caller_json.get('profile_id','CALLER')}:{self.incident_json.get('id','INC')}:{level}"
-        default_seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
-        return {
-            "stress_level": level,
-            "seed": int(cfg.get("seed", default_seed) or default_seed),
-            "interruption_policy": self._norm_policy(
-                cfg.get("interruption_policy"),
-                enabled=level >= 2,
-                probability=min(0.1 + 0.08 * level, 0.9),
-                marker="interruption",
-                defaults={"fragment": "No, wait, listen to me."},
-            ),
-            "non_responsive_policy": self._norm_policy(
-                cfg.get("non_responsive_policy"),
-                enabled=level >= 3,
-                probability=min(0.04 + 0.07 * level, 0.8),
-                marker="non_responsive",
-                defaults={"mode": "silent", "non_verbal_text": "..."},
-            ),
-            "contradiction_policy": self._norm_policy(
-                cfg.get("contradiction_policy"),
-                enabled=level >= 3,
-                probability=min(0.03 + 0.05 * level, 0.6),
-                marker="contradiction",
-                defaults={"text": "Wait, I might be wrong about that detail."},
-            ),
-            "topic_digression_policy": self._norm_policy(
-                cfg.get("topic_digression_policy"),
-                enabled=level >= 2,
-                probability=min(0.05 + 0.06 * level, 0.7),
-                marker="topic_digression",
-                defaults={"text": "Please hurry, I am getting more worried."},
-            ),
-        }
-
-    def _norm_policy(
-        self,
-        policy: Any,
-        *,
-        enabled: bool,
-        probability: float,
-        marker: str,
-        defaults: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        p = policy if isinstance(policy, dict) else {}
-        out: dict[str, Any] = {
-            "enabled": bool(p.get("enabled", enabled)),
-            "probability": max(0.0, min(1.0, float(p.get("probability", probability)))),
-            "turn_offsets": [int(t) for t in p.get("turn_offsets", []) if isinstance(t, (int, float, str)) and str(t).strip().isdigit()],
-            "marker": marker,
-        }
-        if defaults:
-            out.update(defaults)
-        out.update(p)
-        return out
-
-    def _policy_trigger(self, policy: dict[str, Any], turn: int) -> bool:
-        if not bool(policy.get("enabled", False)):
-            return False
-        offsets = policy.get("turn_offsets", [])
-        if isinstance(offsets, list) and turn in {int(x) for x in offsets if str(x).strip().isdigit()}:
-            return True
-        marker = str(policy.get("marker", ""))
-        marker_seed = int(hashlib.sha256(marker.encode("utf-8")).hexdigest()[:6], 16) % 131
-        seed = int(self._stress_cfg.get("seed", 0)) + (turn * 997) + marker_seed
-        rng = random.Random(seed)
-        return rng.random() < float(policy.get("probability", 0.0))
-
-    def _stress_targets_for_turn(self) -> dict[str, Any]:
-        level = int(self._stress_cfg.get("stress_level", 0))
-        if level <= 0:
-            return {"required_markers": [], "detail": {}}
-        required: list[str] = []
-        detail: dict[str, Any] = {}
-        for name in ("non_responsive_policy", "interruption_policy", "topic_digression_policy", "contradiction_policy"):
-            policy = self._stress_cfg.get(name, {})
-            if not isinstance(policy, dict):
-                continue
-            marker = str(policy.get("marker", ""))
-            if marker and self._policy_trigger(policy, self.turn_index):
-                required.append(marker)
-                detail[marker] = dict(policy)
-        # Non-responsive takes precedence over other markers for text shape.
-        if "non_responsive" in required:
-            required = ["non_responsive"]
-        return {"required_markers": required, "detail": detail}
-
-    def _detected_markers(self, text: str) -> set[str]:
-        low = str(text or "").lower()
-        out: set[str] = set()
-        if not low.strip() or "heavy breathing" in low or low.strip() in {"...", "…"}:
-            out.add("non_responsive")
-        if any(tok in low for tok in ("wait", "listen", "sorry", "hold on")):
-            out.add("interruption")
-        if any(tok in low for tok in ("please hurry", "i am scared", "i'm scared", "panicking", "worried")):
-            out.add("topic_digression")
-        if any(tok in low for tok in ("might be wrong", "actually", "not sure that is right", "i may be wrong")):
-            out.add("contradiction")
-        return out
-
-    def _apply_stress_guardrail(
-        self,
-        text: str,
-        required_markers: list[str],
-    ) -> tuple[str, list[str], dict[str, Any]]:
-        if not required_markers:
-            return text, [], {}
-        out = str(text or "")
-        applied: list[str] = []
-        detail: dict[str, Any] = {}
-        required = set(required_markers)
-        detected = self._detected_markers(out)
-        missing = [m for m in required_markers if m not in detected]
-        if not missing:
-            return out, required_markers, {}
-
-        if "non_responsive" in missing:
-            p = self._stress_cfg.get("non_responsive_policy", {})
-            mode = str((p or {}).get("mode", "silent")).lower() if isinstance(p, dict) else "silent"
-            out = "" if mode == "silent" else str((p or {}).get("non_verbal_text", "..."))
-            applied.append("non_responsive")
-            detail["non_responsive"] = {"mode": mode}
-            return out, applied, detail
-
-        if "topic_digression" in missing:
-            p = self._stress_cfg.get("topic_digression_policy", {})
-            prefix = str((p or {}).get("text", "Please hurry, I am very worried."))
-            out = f"{prefix} {out}".strip()
-            applied.append("topic_digression")
-            detail["topic_digression"] = {"text": prefix}
-        if "contradiction" in missing:
-            p = self._stress_cfg.get("contradiction_policy", {})
-            suffix = str((p or {}).get("text", "Wait, I might be wrong about that detail."))
-            out = f"{out} {suffix}".strip()
-            applied.append("contradiction")
-            detail["contradiction"] = {"text": suffix}
-        if "interruption" in missing:
-            p = self._stress_cfg.get("interruption_policy", {})
-            suffix = str((p or {}).get("fragment", "No, wait, listen to me."))
-            out = f"{out} {suffix}".strip()
-            applied.append("interruption")
-            detail["interruption"] = {"fragment": suffix}
-        final_markers = sorted(required.union(set(applied)))
-        return out, final_markers, detail
-
     def next_turn(self, call_taker_text: str, system_events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-        turn_packet, stress_targets = self._turn_update_packet(call_taker_text, system_events)
+        turn_packet = self._turn_update_packet(call_taker_text, system_events)
         try:
             kwargs: dict[str, Any] = {
                 "model": self.model,
@@ -637,47 +473,9 @@ class OpenAICallerAgent:
             if not text:
                 raise ValueError("empty_openai_responses_output")
 
-            required_markers = list(stress_targets.get("required_markers", []))
-            detected = self._detected_markers(text)
-            missing = [m for m in required_markers if m not in detected]
-            retry_count = 0
-            while missing and retry_count < self._stress_retry_max:
-                retry_count += 1
-                coach = (
-                    "[SYSTEM]\n"
-                    "Stress coaching: your last reply did not reflect required stress behavior.\n"
-                    f"required_markers={json.dumps(required_markers)}\n"
-                    "Rewrite your reply now as caller speech only, preserving conversational context.\n"
-                    "[/SYSTEM]"
-                )
-                followup_kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "temperature": self.temperature,
-                    "max_output_tokens": self.max_output_tokens,
-                }
-                prev_id = str(getattr(resp, "id", "")).strip()
-                if prev_id:
-                    followup_kwargs["previous_response_id"] = prev_id
-                    followup_kwargs["input"] = [{"role": "user", "content": coach}]
-                else:
-                    followup_kwargs["input"] = [
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": self._seed_packet()},
-                        {"role": "user", "content": turn_packet},
-                        {"role": "assistant", "content": text},
-                        {"role": "user", "content": coach},
-                    ]
-                resp = self.client.responses.create(**followup_kwargs)
-                retried = self._clean_speech(self._extract_text(resp))
-                if retried:
-                    text = retried
-                detected = self._detected_markers(text)
-                missing = [m for m in required_markers if m not in detected]
-
             response_id = str(getattr(resp, "id", "")).strip()
             self.previous_response_id = response_id or self.previous_response_id
             self._seeded = True
-            text, markers, guardrail_detail = self._apply_stress_guardrail(text, required_markers)
             self._history.extend(
                 [
                     {"role": "user", "content": turn_packet},
@@ -690,15 +488,7 @@ class OpenAICallerAgent:
                 "source": "openai_responses",
                 "response_id": response_id,
                 "fallback": False,
-                "stress_level": int(self._stress_cfg.get("stress_level", 0)),
             }
-            if markers:
-                meta["stressor_markers"] = markers
-                detail = stress_targets.get("detail", {}) if isinstance(stress_targets.get("detail"), dict) else {}
-                if isinstance(guardrail_detail, dict):
-                    detail = dict(detail)
-                    detail.update(guardrail_detail)
-                meta["stressor_detail"] = detail
             return text, meta
         except Exception as exc:
             text, _ = self._fallback_turn(call_taker_text=call_taker_text, system_events=system_events)
@@ -838,9 +628,7 @@ class OpenAISyntheticCallTakerAgent:
         self.max_completion_tokens = int(cfg.get("max_completion_tokens", 500))
         self.use_previous_response_id = bool(cfg.get("use_previous_response_id", True))
         self.max_history_turns = int(cfg.get("max_history_turns", 20))
-        self.max_tool_rounds = max(0, int(cfg.get("max_tool_rounds", 4)))
         self.enable_map_tool = bool(cfg.get("enable_map_tool", True))
-        self.enable_media_tool = bool(cfg.get("enable_media_tool", True))
         self.checkpoint_strategy = str(cfg.get("checkpoint_strategy", "llm_evaluate")).strip().lower()
         self.opening_greeting = str(
             cfg.get(
@@ -931,14 +719,12 @@ class OpenAISyntheticCallTakerAgent:
                     },
                 )
             turn_packet = self._turn_packet(caller_text, cad_state, system_events, self._pending_checkpoints)
-            base_kwargs: dict[str, Any] = {
+            kwargs: dict[str, Any] = {
                 "model": self.model,
                 "temperature": self.temperature,
                 "max_output_tokens": self.max_completion_tokens,
-                "tools": self._tool_specs(),
             }
             if self.use_previous_response_id and self._seeded and self.previous_response_id:
-                kwargs = dict(base_kwargs)
                 kwargs["previous_response_id"] = self.previous_response_id
                 kwargs["input"] = [{"role": "user", "content": turn_packet}]
             else:
@@ -949,42 +735,9 @@ class OpenAISyntheticCallTakerAgent:
                 if self._history:
                     input_msgs.extend(self._history[-(self.max_history_turns * 2) :])
                 input_msgs.append({"role": "user", "content": turn_packet})
-                kwargs = dict(base_kwargs)
                 kwargs["input"] = input_msgs
 
             resp = self.client.responses.create(**kwargs)
-            for _ in range(self.max_tool_rounds):
-                tool_calls = self._extract_tool_calls(resp)
-                if not tool_calls:
-                    break
-                tool_outputs: list[dict[str, Any]] = []
-                for call in tool_calls:
-                    result = self._exec_tool(
-                        call["name"],
-                        call["args"],
-                        cad_state=cad_state,
-                        system_events=system_events,
-                    )
-                    tool_outputs.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call["call_id"],
-                            "output": json.dumps(result),
-                        }
-                    )
-                if not tool_outputs:
-                    break
-                followup_kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "input": tool_outputs,
-                    "temperature": self.temperature,
-                    "max_output_tokens": self.max_completion_tokens,
-                    "tools": self._tool_specs(),
-                }
-                prev_id = str(getattr(resp, "id", "")).strip()
-                if prev_id:
-                    followup_kwargs["previous_response_id"] = prev_id
-                resp = self.client.responses.create(**followup_kwargs)
             response_id = str(getattr(resp, "id", "")).strip()
             self.previous_response_id = response_id or self.previous_response_id
             self._seeded = True
@@ -1044,7 +797,6 @@ class OpenAISyntheticCallTakerAgent:
                 "write_cad": "Provide CAD updates in cad_updates object.",
                 "end_call": "Set end_call=true and provide end_reason/end_reason_detail when call should close.",
                 "checkpoints": "Return checkpoint_decisions array when pending checkpoints exist.",
-                "receive_media": "Use tool calltaker_receive_media(media_id, incident_id?) to retrieve NG911 media details.",
             },
         }
         return (
@@ -1105,131 +857,120 @@ class OpenAISyntheticCallTakerAgent:
                 return {"text": text, "cad_updates": {}, "end_call": False}
 
     def _tool_specs(self) -> list[dict[str, Any]]:
-        def _fn(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "type": "function",
-                "name": name,
-                "description": description,
-                "parameters": parameters,
-            }
-
         tools: list[dict[str, Any]] = [
-            _fn(
-                "read_sop",
-                "Read SOP snippets by incident_type and step.",
-                {
-                    "type": "object",
-                    "properties": {"incident_type": {"type": "string"}, "step": {"type": "string"}},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            ),
-            _fn(
-                "read_cad_state",
-                "Read the current CAD state snapshot.",
-                {"type": "object", "properties": {}, "additionalProperties": False},
-            ),
-            _fn(
-                "read_qa_template",
-                "Read QA template sections/items.",
-                {
-                    "type": "object",
-                    "properties": {"section": {"type": "string"}},
-                    "required": [],
-                    "additionalProperties": False,
-                },
-            ),
-            _fn(
-                "calltaker_receive_media",
-                "Retrieve NG911 media artifact details by media_id.",
-                {
-                    "type": "object",
-                    "properties": {"incident_id": {"type": "string"}, "media_id": {"type": "string"}},
-                    "required": ["media_id"],
-                    "additionalProperties": False,
-                },
-            ),
-            _fn(
-                "write_cad",
-                "Queue CAD field updates to apply this turn.",
-                {
-                    "type": "object",
-                    "properties": {"updates": {"type": "object"}},
-                    "required": ["updates"],
-                    "additionalProperties": False,
-                },
-            ),
-            _fn(
-                "end_call",
-                "Flag call termination.",
-                {
-                    "type": "object",
-                    "properties": {"reason": {"type": "string"}, "reason_detail": {"type": "string"}},
-                    "required": ["reason"],
-                    "additionalProperties": False,
-                },
-            ),
-            _fn(
-                "list_checkpoints",
-                "List pending checkpoint requests for the call-taker role.",
-                {"type": "object", "properties": {}, "additionalProperties": False},
-            ),
-            _fn(
-                "submit_checkpoint",
-                "Queue a checkpoint decision for submission.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "request_id": {"type": "string"},
-                        "decision": {"type": "string"},
-                        "edited_payload": {"type": "object"},
-                        "rationale": {"type": "string"},
-                        "re_escalate_to": {"type": "string"},
-                    },
-                    "required": ["request_id", "decision"],
-                    "additionalProperties": False,
-                },
-            ),
-        ]
-        if self.enable_map_tool:
-            tools.append(
-                _fn(
-                    "view_map",
-                    "Inspect approximate map/location context for the incident.",
-                    {
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_sop",
+                    "description": "Read SOP snippets by incident_type and step.",
+                    "parameters": {
                         "type": "object",
-                        "properties": {"query": {"type": "string"}},
+                        "properties": {
+                            "incident_type": {"type": "string"},
+                            "step": {"type": "string"},
+                        },
                         "required": [],
                         "additionalProperties": False,
                     },
-                )
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_cad_state",
+                    "description": "Read the current CAD state snapshot.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_qa_template",
+                    "description": "Read QA template sections/items.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"section": {"type": "string"}},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_cad",
+                    "description": "Queue CAD field updates to apply this turn.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"updates": {"type": "object"}},
+                        "required": ["updates"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "end_call",
+                    "description": "Flag call termination.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string"},
+                            "reason_detail": {"type": "string"},
+                        },
+                        "required": ["reason"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_checkpoints",
+                    "description": "List pending checkpoint requests for the call-taker role.",
+                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_checkpoint",
+                    "description": "Queue a checkpoint decision for submission.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {"type": "string"},
+                            "decision": {"type": "string"},
+                            "edited_payload": {"type": "object"},
+                            "rationale": {"type": "string"},
+                            "re_escalate_to": {"type": "string"},
+                        },
+                        "required": ["request_id", "decision"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+        if self.enable_map_tool:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "view_map",
+                        "description": "Inspect approximate map/location context for the incident.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                            },
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
             )
-        if not self.enable_media_tool:
-            tools = [t for t in tools if str(t.get("name", "")) != "calltaker_receive_media"]
         return tools
-
-    def _extract_tool_calls(self, resp: Any) -> list[dict[str, Any]]:
-        calls: list[dict[str, Any]] = []
-        output = getattr(resp, "output", None)
-        if not isinstance(output, list):
-            return calls
-        for item in output:
-            item_type = str(getattr(item, "type", "") or "")
-            if item_type != "function_call":
-                continue
-            name = str(getattr(item, "name", "") or "")
-            call_id = str(getattr(item, "call_id", "") or "")
-            args_raw = str(getattr(item, "arguments", "") or "")
-            if not name or not call_id:
-                continue
-            try:
-                args = json.loads(args_raw) if args_raw else {}
-            except Exception:
-                args = {}
-            if not isinstance(args, dict):
-                args = {}
-            calls.append({"name": name, "call_id": call_id, "args": args})
-        return calls
 
     def _exec_tool(
         self,
@@ -1250,32 +991,6 @@ class OpenAISyntheticCallTakerAgent:
             if section and isinstance(templates, dict):
                 return {"section": section, "template": templates.get(section)}
             return {"templates": templates}
-        if tool_name in {"calltaker_receive_media", "calltaker.receive_media"}:
-            requested_incident = str(args.get("incident_id", "")).strip()
-            current_incident = str(self.incident_json.get("id", "")).strip()
-            if requested_incident and current_incident and requested_incident != current_incident:
-                return {"error": "incident_id_mismatch", "incident_id": current_incident}
-            media_id = str(args.get("media_id", "")).strip()
-            if not media_id:
-                return {"error": "media_id_required"}
-            media_rows = self.incident_json.get("ng911_media", [])
-            if not isinstance(media_rows, list):
-                media_rows = []
-            for row in media_rows:
-                if not isinstance(row, dict):
-                    continue
-                if str(row.get("media_id", "")).strip() == media_id:
-                    return {
-                        "incident_id": current_incident,
-                        "media_id": media_id,
-                        "media": {
-                            "type": str(row.get("type", "unknown")),
-                            "description": str(row.get("description", "")),
-                            "valence": str(row.get("valence", "neutral")),
-                            "payload": row.get("payload", {}),
-                        },
-                    }
-            return {"error": "media_not_found", "incident_id": current_incident, "media_id": media_id}
         if tool_name == "view_map":
             loc = self.incident_json.get("location", {}) if isinstance(self.incident_json.get("location"), dict) else {}
             return {
@@ -1453,8 +1168,7 @@ class OpenAIQAEvaluatorAgent:
     def _normalize_score_payload(self, obj: dict[str, Any], incident_type: str, qa_input: dict[str, Any] | None = None) -> dict[str, Any]:
         if "normalized_score" not in obj:
             raise ValueError("qa_missing_normalized_score")
-        stress_level = self._qa_stress_level(qa_input)
-        template_idx = self._template_item_index(str(incident_type).upper(), stress_level=stress_level)
+        template_idx = self._template_item_index(str(incident_type).upper())
         transcript = (qa_input or {}).get("transcript", []) if isinstance(qa_input, dict) else []
         items = obj.get("items") if isinstance(obj.get("items"), list) else []
         if not items and isinstance(obj.get("rows"), list):
@@ -1463,14 +1177,11 @@ class OpenAIQAEvaluatorAgent:
         answer_enum = {"YES", "NO", "REFUSED", "NA"}
         awarded = 0.0
         possible = 0.0
-        seen_ids: set[str] = set()
         for it in items:
             if not isinstance(it, dict):
                 continue
             item_id = str(it.get("id", "unknown"))
-            seen_ids.add(item_id)
             tpl = template_idx.get(item_id, {})
-            section_active = bool(tpl.get("active", True))
             pp_raw = it.get("points_possible", it.get("max_points", tpl.get("points", 0.0)))
             pa_raw = it.get("points_awarded", it.get("awarded", 0.0))
             pp = float(pp_raw or 0.0)
@@ -1483,8 +1194,6 @@ class OpenAIQAEvaluatorAgent:
                     ans = "NO"
                 else:
                     ans = "YES"
-            if not section_active:
-                ans = "NA"
             # Policy hardening: if call-taker clearly asked the required question,
             # award full credit even when caller refused/couldn't answer.
             if ans in {"REFUSED", "NO"} and pp > 0 and self._was_required_question_clearly_asked(
@@ -1495,7 +1204,7 @@ class OpenAIQAEvaluatorAgent:
                 ans = "YES"
             # Resolve inconsistent model outputs deterministically:
             # if positive points are awarded, treat as YES regardless of answer token.
-            if section_active and pp > 0 and pa > 0 and ans != "YES":
+            if pp > 0 and pa > 0 and ans != "YES":
                 ans = "YES"
             # Enforce binary/no-partial scoring policy:
             # YES => full points; NO/REFUSED/NA => 0
@@ -1511,35 +1220,6 @@ class OpenAIQAEvaluatorAgent:
                     "points_possible": pp,
                     "rationale": str(it.get("rationale", "")),
                     "evidence_turns": [int(x) for x in it.get("evidence_turns", []) if isinstance(x, (int, float))],
-                }
-            )
-        # Ensure complete rubric coverage even when model omits rows.
-        for item_id, tpl in template_idx.items():
-            if item_id in seen_ids:
-                continue
-            if not bool(tpl.get("stress_only", False)):
-                continue
-            section_active = bool(tpl.get("active", True))
-            pp = float(tpl.get("points", 0.0) or 0.0)
-            if section_active:
-                ans, rationale = self._score_missing_stress_item(
-                    item_id=item_id,
-                    transcript=transcript,
-                    qa_input=qa_input,
-                )
-            else:
-                ans, rationale = "NA", "stress_not_applicable_at_current_level"
-            pa = pp if ans == "YES" else 0.0
-            awarded += pa
-            possible += pp if ans != "NA" else 0.0
-            norm_items.append(
-                {
-                    "id": item_id,
-                    "answer": ans,
-                    "points_awarded": pa,
-                    "points_possible": pp,
-                    "rationale": rationale,
-                    "evidence_turns": [],
                 }
             )
         total_awarded = awarded
@@ -1622,7 +1302,7 @@ class OpenAIQAEvaluatorAgent:
             )
         return rows
 
-    def _template_item_index(self, incident_type: str, *, stress_level: int = 0) -> dict[str, dict[str, Any]]:
+    def _template_item_index(self, incident_type: str) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
         templates = self.qa_template_json.get("templates", {})
         if not isinstance(templates, dict):
@@ -1634,71 +1314,13 @@ class OpenAIQAEvaluatorAgent:
             for sec in block.get("sections", []):
                 if not isinstance(sec, dict):
                     continue
-                active = self._section_applies(sec, stress_level=stress_level)
-                applies = sec.get("applies_when") if isinstance(sec.get("applies_when"), dict) else {}
-                stress_only = "stress_min_level" in applies
                 for item in sec.get("items", []):
                     if isinstance(item, dict) and item.get("id"):
                         out[str(item["id"])] = {
                             "points": float(item.get("points", 0.0) or 0.0),
                             "question": str(item.get("question", "")),
-                            "active": active,
-                            "stress_only": stress_only,
                         }
         return out
-
-    def _qa_stress_level(self, qa_input: dict[str, Any] | None) -> int:
-        if not isinstance(qa_input, dict):
-            return 0
-        level = 0
-        for ev in qa_input.get("stress_events", []) if isinstance(qa_input.get("stress_events"), list) else []:
-            if isinstance(ev, dict):
-                level = max(level, int(ev.get("stress_level", 0) or 0))
-        meta = qa_input.get("meta")
-        if isinstance(meta, dict):
-            level = max(level, int(meta.get("stress_level", 0) or 0))
-        return max(0, min(5, level))
-
-    def _section_applies(self, section: dict[str, Any], *, stress_level: int) -> bool:
-        applies = section.get("applies_when")
-        if not isinstance(applies, dict):
-            return True
-        min_stress = applies.get("stress_min_level")
-        if isinstance(min_stress, (int, float)) and stress_level < int(min_stress):
-            return False
-        return True
-
-    def _score_missing_stress_item(
-        self,
-        *,
-        item_id: str,
-        transcript: list[dict[str, Any]],
-        qa_input: dict[str, Any] | None,
-    ) -> tuple[str, str]:
-        stress_events = []
-        if isinstance(qa_input, dict) and isinstance(qa_input.get("stress_events"), list):
-            stress_events = [e for e in qa_input.get("stress_events", []) if isinstance(e, dict)]
-        ct_lines = [str(r.get("call_taker", "")).lower() for r in transcript if isinstance(r, dict)]
-        has_stress = any(str(e.get("event_type", "")) == "stressor_applied" for e in stress_events)
-        interruption_count = sum(1 for e in stress_events if str(e.get("marker", "")) == "interruption")
-        nonresponsive_count = sum(1 for e in stress_events if str(e.get("marker", "")) == "non_responsive")
-
-        if item_id == "stress_call_control":
-            negatives = ("shut up", "whatever", "go away", "not listening")
-            if any(any(n in line for n in negatives) for line in ct_lines):
-                return "NO", "Call-taker language shows loss of control under stress."
-            if has_stress and ct_lines:
-                return "YES", "Call-taker maintained professional control despite stress indicators."
-            return "NO", "No clear evidence of controlled response to stress indicators."
-
-        if item_id == "stress_information_recovery":
-            ask_tokens = ("address", "location", "where", "confirm", "repeat", "cross street")
-            recovery_questions = sum(1 for line in ct_lines if any(tok in line for tok in ask_tokens))
-            if has_stress and (interruption_count > 0 or nonresponsive_count > 0) and recovery_questions >= 2:
-                return "YES", "Call-taker recovered key information after stress-disrupted turns."
-            return "NO", "Insufficient evidence of information recovery after stress disruptions."
-
-        return "NO", "Stress item not scored by model and no rule match available."
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()

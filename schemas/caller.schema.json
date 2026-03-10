@@ -83,63 +83,7 @@
         "precision_level": { "type": "string", "enum": ["Low", "Medium", "High"] }
       }
     },
-    "stressor_config": {
-      "type": "object",
-      "properties": {
-        "stress_level": { "type": "integer", "minimum": 0, "maximum": 5 },
-        "seed": { "type": "integer", "minimum": 0 },
-        "interruption_policy": { "$ref": "#/$defs/stressor_policy" },
-        "non_responsive_policy": {
-          "allOf": [
-            { "$ref": "#/$defs/stressor_policy" },
-            {
-              "type": "object",
-              "properties": {
-                "mode": { "type": "string", "enum": ["silent", "non_verbal"] },
-                "non_verbal_text": { "type": "string" }
-              }
-            }
-          ]
-        },
-        "media_policy": { "$ref": "#/$defs/stressor_policy" },
-        "threat_escalation_policy": { "$ref": "#/$defs/stressor_policy" },
-        "topic_digression_policy": {
-          "allOf": [
-            { "$ref": "#/$defs/stressor_policy" },
-            {
-              "type": "object",
-              "properties": {
-                "text": { "type": "string" }
-              }
-            }
-          ]
-        },
-        "contradiction_policy": {
-          "allOf": [
-            { "$ref": "#/$defs/stressor_policy" },
-            {
-              "type": "object",
-              "properties": {
-                "field": { "type": "string" },
-                "text": { "type": "string" }
-              }
-            }
-          ]
-        },
-        "language_switching_policy": { "$ref": "#/$defs/stressor_policy" }
-      }
-    },
     "opening_style": { "type": "string" },
     "example_short_answers": { "type": "object", "additionalProperties": { "type": "string" } }
-  },
-  "$defs": {
-    "stressor_policy": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "turn_offsets": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
-        "probability": { "type": "number", "minimum": 0, "maximum": 1 }
-      }
-    }
   }
 }

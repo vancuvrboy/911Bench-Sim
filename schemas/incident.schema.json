@@ -49,24 +49,6 @@
       "type": "integer",
       "minimum": 1,
       "description": "Number of conversation turns between dispatch and responder arrival."
-    },
-    "calltaker_degradation_config": {
-      "type": "object",
-      "description": "Optional stress/degradation config for synthetic call-taker behavior experiments.",
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "stress_level": { "type": "integer", "minimum": 0, "maximum": 5 },
-        "degradation_seed": { "type": "integer", "minimum": 0 },
-        "omission_probability": { "type": "number", "minimum": 0, "maximum": 1 },
-        "verification_skip_probability": { "type": "number", "minimum": 0, "maximum": 1 },
-        "dispatch_delay_probability": { "type": "number", "minimum": 0, "maximum": 1 },
-        "dispatch_delay_turns": { "type": "integer", "minimum": 1 },
-        "load_threshold": { "type": "integer", "minimum": 1 },
-        "load_increments": {
-          "type": "object",
-          "additionalProperties": { "type": "integer", "minimum": 0 }
-        }
-      }
     }
   }
 }

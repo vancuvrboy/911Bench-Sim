@@ -20,7 +20,6 @@ def build_qa_input(*, events: list[dict[str, Any]], qa_template: dict[str, Any],
     ]
     tool_calls = [_compact_tool_call(e) for e in events if e.get("event_type") == "tool_call"]
     system_events = [_compact_system_event(e) for e in events if e.get("event_type") == "system"]
-    stress_events = [_compact_stress_event(e) for e in events if e.get("event_type") in {"stressor_applied", "degradation_applied"}]
     call_record = _last_value_call_record(tool_calls)
     normalize, normalize_to = _resolve_normalization(qa_template)
     template_out = dict(qa_template)
@@ -39,15 +38,12 @@ def build_qa_input(*, events: list[dict[str, Any]], qa_template: dict[str, Any],
             "incident_id": meta.get("incident_id"),
             "incident_type": meta.get("incident_type"),
             "qa_template_id": meta.get("qa_template_id"),
-            "stress_level": int(((meta.get("stress_config") or {}) if isinstance(meta.get("stress_config"), dict) else {}).get("stress_level", 0) or 0),
         },
         "incident": {"type": incident_type},
         "tool_calls": tool_calls,
         "system_events": system_events,
-        "stress_events": stress_events,
         "metrics": {
             "dispatch": _dispatch_metrics(tool_calls),
-            "stress_event_count": len(stress_events),
         },
 }
 
@@ -186,19 +182,6 @@ def _compact_system_event(ev: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _compact_stress_event(ev: dict[str, Any]) -> dict[str, Any]:
-    out = {
-        "event_type": str(ev.get("event_type", "")),
-        "turn": int(ev.get("turn", 0) or 0),
-        "marker": str(ev.get("marker", "")),
-    }
-    if "stress_level" in ev:
-        out["stress_level"] = int(ev.get("stress_level", 0) or 0)
-    if ev.get("detail") is not None:
-        out["detail"] = ev.get("detail")
-    return out
-
-
 def _dispatch_metrics(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
     for tc in tool_calls:
         args = tc.get("args", {})
@@ -248,14 +231,7 @@ def _section_order(qa_template: dict[str, Any], qa_score: dict[str, Any]) -> lis
                     order.append(str(sec["name"]))
     if not order:
         return sorted(set(str(r.get("section", "UNKNOWN")) for r in _enriched_rows(qa_score, qa_template)))
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for sec in order:
-        if sec in seen:
-            continue
-        seen.add(sec)
-        deduped.append(sec)
-    return deduped
+    return order
 
 
 def _enriched_rows(qa_score: dict[str, Any], qa_template: dict[str, Any]) -> list[dict[str, Any]]:

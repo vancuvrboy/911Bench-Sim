@@ -22,7 +22,6 @@ class QAEvaluatorAgent:
         self._sim_fail_consumed = False
 
     def evaluate(self, events: list[dict[str, Any]], incident_type: str) -> dict[str, Any]:
-        stress_level = self._stress_level(events)
         merged_sections = self._merged_sections(incident_type)
         items = []
         awarded = 0.0
@@ -36,26 +35,20 @@ class QAEvaluatorAgent:
         ).lower()
 
         for section in merged_sections:
-            section_active = self._section_applies(section, stress_level)
             for item in section.get("items", []):
                 item_id = str(item.get("id", "unknown"))
                 points = float(item.get("points", 0))
-                if section_active:
-                    possible += points
+                possible += points
                 # Simulate one malformed parse, then retry up to parse_retry_max.
                 if self.simulate_parse_fail_once and not self._sim_fail_consumed:
                     self._sim_fail_consumed = True
                     parse_retries += 1
                     if parse_retries > self.parse_retry_max:
                         raise ValueError("qa_parse_retry_exhausted")
-                if section_active:
-                    yes = self._heuristic_yes(item_id=item_id, prompt=str(item.get("question", "")).lower(), text=text_blob)
-                    answer = "YES" if yes else "NO"
-                    item_awarded = points if yes else 0.0
-                    awarded += item_awarded
-                else:
-                    answer = "NA"
-                    item_awarded = 0.0
+                yes = self._heuristic_yes(item_id=item_id, prompt=str(item.get("question", "")).lower(), text=text_blob)
+                answer = "YES" if yes else "NO"
+                item_awarded = points if yes else 0.0
+                awarded += item_awarded
                 items.append(
                     {
                         "id": item_id,
@@ -89,27 +82,6 @@ class QAEvaluatorAgent:
         common = (templates.get("COMMON") or {}).get("sections", [])
         specific = (templates.get(incident_type.upper()) or {}).get("sections", [])
         return list(common) + list(specific)
-
-    def _stress_level(self, events: list[dict[str, Any]]) -> int:
-        level = 0
-        for ev in events:
-            if ev.get("event_type") == "stressor_applied":
-                level = max(level, int(ev.get("stress_level", 0) or 0))
-            if ev.get("event_type") == "meta":
-                sc = ev.get("stress_config")
-                if isinstance(sc, dict):
-                    level = max(level, int(sc.get("stress_level", 0) or 0))
-        return max(0, min(5, level))
-
-    def _section_applies(self, section: dict[str, Any], stress_level: int) -> bool:
-        applies = section.get("applies_when")
-        if not isinstance(applies, dict):
-            return True
-        min_stress = applies.get("stress_min_level")
-        if isinstance(min_stress, (int, float)):
-            if stress_level < int(min_stress):
-                return False
-        return True
 
     def _heuristic_yes(self, item_id: str, prompt: str, text: str) -> bool:
         if "location" in prompt:
