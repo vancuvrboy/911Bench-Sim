@@ -83,8 +83,44 @@ class TestQAStressApplicability(unittest.TestCase):
         self.assertIn("stress_item", by_id)
         self.assertEqual(by_id["stress_item"]["answer"], "NO")
         self.assertEqual(float(by_id["stress_item"]["points_awarded"]), 0.0)
-        self.assertEqual(by_id["stress_item"]["rationale"], "stress_item_not_scored_by_model")
+        self.assertIn("rule", by_id["stress_item"]["rationale"].lower())
         self.assertEqual(float(out["total_points_possible"]), 15.0)
+
+    def test_openai_stress_item_rule_can_award_yes(self) -> None:
+        agent = object.__new__(OpenAIQAEvaluatorAgent)
+        agent.qa_template_json = {
+            "version": "003",
+            "normalize_to": 100,
+            "templates": {
+                "COMMON": {
+                    "sections": [
+                        {
+                            "name": "Stress Response Quality",
+                            "applies_when": {"stress_min_level": 1},
+                            "items": [
+                                {"id": "stress_information_recovery", "question": "Recover info", "points": 5}
+                            ],
+                        }
+                    ]
+                },
+                "FIRE": {"sections": []},
+            },
+        }
+        model_obj = {"normalized_score": 0, "incident_type": "FIRE", "items": []}
+        qa_input = {
+            "stress_events": [
+                {"event_type": "stressor_applied", "marker": "interruption", "stress_level": 3},
+                {"event_type": "stressor_applied", "marker": "non_responsive", "stress_level": 3},
+            ],
+            "transcript": [
+                {"turn": 1, "call_taker": "What is the exact address?", "caller": ""},
+                {"turn": 2, "call_taker": "Can you repeat the location and cross street?", "caller": "2421 Main"},
+            ],
+        }
+        out = agent._normalize_score_payload(model_obj, incident_type="FIRE", qa_input=qa_input)
+        by_id = {row["id"]: row for row in out["items"]}
+        self.assertEqual(by_id["stress_information_recovery"]["answer"], "YES")
+        self.assertEqual(float(by_id["stress_information_recovery"]["points_awarded"]), 5.0)
 
 
 if __name__ == "__main__":

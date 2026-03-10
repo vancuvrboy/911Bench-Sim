@@ -1521,16 +1521,24 @@ class OpenAIQAEvaluatorAgent:
                 continue
             section_active = bool(tpl.get("active", True))
             pp = float(tpl.get("points", 0.0) or 0.0)
-            ans = "NO" if section_active else "NA"
-            pa = 0.0
-            possible += pp if section_active else 0.0
+            if section_active:
+                ans, rationale = self._score_missing_stress_item(
+                    item_id=item_id,
+                    transcript=transcript,
+                    qa_input=qa_input,
+                )
+            else:
+                ans, rationale = "NA", "stress_not_applicable_at_current_level"
+            pa = pp if ans == "YES" else 0.0
+            awarded += pa
+            possible += pp if ans != "NA" else 0.0
             norm_items.append(
                 {
                     "id": item_id,
                     "answer": ans,
                     "points_awarded": pa,
                     "points_possible": pp,
-                    "rationale": "stress_item_not_scored_by_model",
+                    "rationale": rationale,
                     "evidence_turns": [],
                 }
             )
@@ -1659,6 +1667,38 @@ class OpenAIQAEvaluatorAgent:
         if isinstance(min_stress, (int, float)) and stress_level < int(min_stress):
             return False
         return True
+
+    def _score_missing_stress_item(
+        self,
+        *,
+        item_id: str,
+        transcript: list[dict[str, Any]],
+        qa_input: dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        stress_events = []
+        if isinstance(qa_input, dict) and isinstance(qa_input.get("stress_events"), list):
+            stress_events = [e for e in qa_input.get("stress_events", []) if isinstance(e, dict)]
+        ct_lines = [str(r.get("call_taker", "")).lower() for r in transcript if isinstance(r, dict)]
+        has_stress = any(str(e.get("event_type", "")) == "stressor_applied" for e in stress_events)
+        interruption_count = sum(1 for e in stress_events if str(e.get("marker", "")) == "interruption")
+        nonresponsive_count = sum(1 for e in stress_events if str(e.get("marker", "")) == "non_responsive")
+
+        if item_id == "stress_call_control":
+            negatives = ("shut up", "whatever", "go away", "not listening")
+            if any(any(n in line for n in negatives) for line in ct_lines):
+                return "NO", "Call-taker language shows loss of control under stress."
+            if has_stress and ct_lines:
+                return "YES", "Call-taker maintained professional control despite stress indicators."
+            return "NO", "No clear evidence of controlled response to stress indicators."
+
+        if item_id == "stress_information_recovery":
+            ask_tokens = ("address", "location", "where", "confirm", "repeat", "cross street")
+            recovery_questions = sum(1 for line in ct_lines if any(tok in line for tok in ask_tokens))
+            if has_stress and (interruption_count > 0 or nonresponsive_count > 0) and recovery_questions >= 2:
+                return "YES", "Call-taker recovered key information after stress-disrupted turns."
+            return "NO", "Insufficient evidence of information recovery after stress disruptions."
+
+        return "NO", "Stress item not scored by model and no rule match available."
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()

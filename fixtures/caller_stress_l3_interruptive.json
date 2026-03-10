@@ -57,23 +57,26 @@
     "seed": 313,
     "interruption_policy": {
       "enabled": true,
+      "turn_offsets": [2, 4, 6],
       "probability": 0.45,
       "fragment": "No, wait, listen to me."
     },
     "non_responsive_policy": {
       "enabled": true,
+      "turn_offsets": [5],
       "probability": 0.2,
-      "mode": "non_verbal",
-      "non_verbal_text": "...heavy breathing..."
+      "mode": "silent"
     },
     "contradiction_policy": {
       "enabled": true,
+      "turn_offsets": [7],
       "probability": 0.2,
       "field": "current_location",
       "text": "Wait, I might be wrong about the exact unit."
     },
     "topic_digression_policy": {
       "enabled": true,
+      "turn_offsets": [2, 3, 8],
       "probability": 0.25,
       "text": "Please hurry, I think it is getting worse."
     }
