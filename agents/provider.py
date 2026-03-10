@@ -1044,7 +1044,7 @@ class OpenAISyntheticCallTakerAgent:
                 "write_cad": "Provide CAD updates in cad_updates object.",
                 "end_call": "Set end_call=true and provide end_reason/end_reason_detail when call should close.",
                 "checkpoints": "Return checkpoint_decisions array when pending checkpoints exist.",
-                "receive_media": "Retrieve structured NG911 media details by media_id if caller references attachment/evidence.",
+                "receive_media": "Use tool calltaker_receive_media(media_id, incident_id?) to retrieve NG911 media details.",
             },
         }
         return (
@@ -1146,7 +1146,7 @@ class OpenAISyntheticCallTakerAgent:
             {
                 "type": "function",
                 "function": {
-                    "name": "calltaker.receive_media",
+                    "name": "calltaker_receive_media",
                     "description": "Retrieve NG911 media artifact details by media_id.",
                     "parameters": {
                         "type": "object",
@@ -1235,7 +1235,7 @@ class OpenAISyntheticCallTakerAgent:
                 }
             )
         if not self.enable_media_tool:
-            tools = [t for t in tools if str((t.get("function") or {}).get("name", "")) != "calltaker.receive_media"]
+            tools = [t for t in tools if str((t.get("function") or {}).get("name", "")) != "calltaker_receive_media"]
         return tools
 
     def _extract_tool_calls(self, resp: Any) -> list[dict[str, Any]]:
@@ -1280,7 +1280,7 @@ class OpenAISyntheticCallTakerAgent:
             if section and isinstance(templates, dict):
                 return {"section": section, "template": templates.get(section)}
             return {"templates": templates}
-        if tool_name == "calltaker.receive_media":
+        if tool_name in {"calltaker_receive_media", "calltaker.receive_media"}:
             requested_incident = str(args.get("incident_id", "")).strip()
             current_incident = str(self.incident_json.get("id", "")).strip()
             if requested_incident and current_incident and requested_incident != current_incident:
@@ -1547,6 +1547,8 @@ class OpenAIQAEvaluatorAgent:
         for item_id, tpl in template_idx.items():
             if item_id in seen_ids:
                 continue
+            if not bool(tpl.get("stress_only", False)):
+                continue
             section_active = bool(tpl.get("active", True))
             pp = float(tpl.get("points", 0.0) or 0.0)
             ans = "NO" if section_active else "NA"
@@ -1558,7 +1560,7 @@ class OpenAIQAEvaluatorAgent:
                     "answer": ans,
                     "points_awarded": pa,
                     "points_possible": pp,
-                    "rationale": "missing_from_model_output",
+                    "rationale": "stress_item_not_scored_by_model",
                     "evidence_turns": [],
                 }
             )
@@ -1655,12 +1657,15 @@ class OpenAIQAEvaluatorAgent:
                 if not isinstance(sec, dict):
                     continue
                 active = self._section_applies(sec, stress_level=stress_level)
+                applies = sec.get("applies_when") if isinstance(sec.get("applies_when"), dict) else {}
+                stress_only = "stress_min_level" in applies
                 for item in sec.get("items", []):
                     if isinstance(item, dict) and item.get("id"):
                         out[str(item["id"])] = {
                             "points": float(item.get("points", 0.0) or 0.0),
                             "question": str(item.get("question", "")),
                             "active": active,
+                            "stress_only": stress_only,
                         }
         return out
 

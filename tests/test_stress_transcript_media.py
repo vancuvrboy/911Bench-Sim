@@ -80,10 +80,10 @@ class TestStressTranscriptAndMedia(unittest.TestCase):
 
         specs = agent._tool_specs()
         names = {str((s.get("function") or {}).get("name", "")) for s in specs}
-        self.assertIn("calltaker.receive_media", names)
+        self.assertIn("calltaker_receive_media", names)
 
         out = agent._exec_tool(
-            "calltaker.receive_media",
+            "calltaker_receive_media",
             {"incident_id": "INC-FIRE-MEDIA-001", "media_id": "m1"},
             cad_state={},
             system_events=[],

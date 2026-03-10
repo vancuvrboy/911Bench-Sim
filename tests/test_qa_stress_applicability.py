@@ -83,6 +83,7 @@ class TestQAStressApplicability(unittest.TestCase):
         self.assertIn("stress_item", by_id)
         self.assertEqual(by_id["stress_item"]["answer"], "NO")
         self.assertEqual(float(by_id["stress_item"]["points_awarded"]), 0.0)
+        self.assertEqual(by_id["stress_item"]["rationale"], "stress_item_not_scored_by_model")
         self.assertEqual(float(out["total_points_possible"]), 15.0)
 
 

@@ -248,7 +248,14 @@ def _section_order(qa_template: dict[str, Any], qa_score: dict[str, Any]) -> lis
                     order.append(str(sec["name"]))
     if not order:
         return sorted(set(str(r.get("section", "UNKNOWN")) for r in _enriched_rows(qa_score, qa_template)))
-    return order
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for sec in order:
+        if sec in seen:
+            continue
+        seen.add(sec)
+        deduped.append(sec)
+    return deduped
 
 
 def _enriched_rows(qa_score: dict[str, Any], qa_template: dict[str, Any]) -> list[dict[str, Any]]:

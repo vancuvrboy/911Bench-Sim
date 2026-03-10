@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from sim_server.qa_pipeline import build_qa_input
+from sim_server.qa_pipeline import _section_order, build_qa_input
 
 
 class TestQAStressInput(unittest.TestCase):
@@ -48,6 +48,17 @@ class TestQAStressInput(unittest.TestCase):
         self.assertEqual(int(qa_input["metrics"]["stress_event_count"]), 2)
         self.assertEqual(len(qa_input["stress_events"]), 2)
         self.assertEqual(qa_input["stress_events"][0]["marker"], "interruption")
+
+    def test_section_order_dedupes_duplicate_section_names(self) -> None:
+        qa_template = {
+            "templates": {
+                "COMMON": {"sections": [{"name": "Telephone Protocol / Skills"}]},
+                "FIRE": {"sections": [{"name": "Telephone Protocol / Skills"}]},
+            }
+        }
+        qa_score = {"incident_type": "FIRE"}
+        order = _section_order(qa_template, qa_score)
+        self.assertEqual(order, ["Telephone Protocol / Skills"])
 
 
 if __name__ == "__main__":
