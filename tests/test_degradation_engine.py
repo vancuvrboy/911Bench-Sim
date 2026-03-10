@@ -21,6 +21,10 @@ def _incident_with_degradation() -> dict:
         "dispatch_delay_probability": 1.0,
         "dispatch_delay_turns": 1,
         "verification_skip_probability": 1.0,
+        "turn_time_budget_ms": 1000,
+        "base_turn_cost_ms": 2200,
+        "cad_field_cost_ms": 600,
+        "interruption_penalty_ms": 800,
     }
     return incident
 
@@ -58,6 +62,7 @@ class TestDegradationEngine(unittest.TestCase):
         self.assertIn("verification_skipped", markers)
         self.assertIn("dispatch_delay_injected", markers)
         self.assertIn("dispatch_delay_released", markers)
+        self.assertIn("time_pressure", markers)
 
         tool_calls = [e for e in events if e.get("event_type") == "tool_call"]
         self.assertGreaterEqual(len(tool_calls), 1)

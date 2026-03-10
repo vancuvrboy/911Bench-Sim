@@ -76,6 +76,7 @@ class Episode:
     degradation_rng_seed: int = 0
     cumulative_stress_load: int = 0
     deferred_dispatch_turns: int = 0
+    sim_time_ms: int = 0
 
 
 class SimulationEngine:
@@ -1010,6 +1011,11 @@ class SimulationEngine:
             "dispatch_delay_probability": max(0.0, min(1.0, float(cfg.get("dispatch_delay_probability", 0.0)))),
             "dispatch_delay_turns": max(1, int(cfg.get("dispatch_delay_turns", 1))),
             "load_threshold": max(1, int(cfg.get("load_threshold", 4))),
+            "turn_time_budget_ms": max(0, int(cfg.get("turn_time_budget_ms", 0))),
+            "base_turn_cost_ms": max(0, int(cfg.get("base_turn_cost_ms", 2500))),
+            "cad_field_cost_ms": max(0, int(cfg.get("cad_field_cost_ms", 900))),
+            "interruption_penalty_ms": max(0, int(cfg.get("interruption_penalty_ms", 1200))),
+            "nonresponsive_penalty_ms": max(0, int(cfg.get("nonresponsive_penalty_ms", 1500))),
             "load_increments": {
                 "interruption": int(cfg.get("load_increments", {}).get("interruption", 1))
                 if isinstance(cfg.get("load_increments"), dict)
@@ -1051,6 +1057,33 @@ class SimulationEngine:
 
         threshold = int(cfg.get("load_threshold", 4))
         multiplier = 1.0 if ep.cumulative_stress_load < threshold else 1.5
+
+        markers_present = set()
+        if isinstance(caller_metadata, dict):
+            raw = caller_metadata.get("stressor_markers")
+            if isinstance(raw, list):
+                markers_present = {str(x) for x in raw}
+        turn_budget_ms = int(cfg.get("turn_time_budget_ms", 0))
+        if turn_budget_ms > 0:
+            base_cost = int(cfg.get("base_turn_cost_ms", 2500))
+            cad_cost = int(cfg.get("cad_field_cost_ms", 900)) * len(out_updates)
+            int_penalty = int(cfg.get("interruption_penalty_ms", 1200)) * (1 if "interruption" in markers_present else 0)
+            nonresp_penalty = int(cfg.get("nonresponsive_penalty_ms", 1500)) * (1 if "non_responsive" in markers_present else 0)
+            estimated_ms = base_cost + cad_cost + int_penalty + nonresp_penalty
+            ep.sim_time_ms += estimated_ms
+            if estimated_ms > turn_budget_ms:
+                markers.append(
+                    (
+                        "time_pressure",
+                        {
+                            "estimated_turn_cost_ms": estimated_ms,
+                            "turn_budget_ms": turn_budget_ms,
+                            "cad_field_count": len(out_updates),
+                        },
+                    )
+                )
+                # Under time pressure, raise degradation likelihood.
+                multiplier *= 1.35
 
         om_prob = min(1.0, float(cfg.get("omission_probability", 0.0)) * multiplier)
         if out_updates and rng.random() < om_prob:

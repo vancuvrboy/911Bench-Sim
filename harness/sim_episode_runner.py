@@ -180,6 +180,21 @@ class SimEpisodeRunner:
                     )
 
             engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
+            if (
+                replay_steps is None
+                and isinstance(caller_meta, dict)
+                and isinstance(caller_meta.get("stressor_markers"), list)
+                and "interruption" in {str(m) for m in caller_meta.get("stressor_markers", [])}
+            ):
+                interjection_text, interjection_meta = caller_agent.next_turn(
+                    call_taker_text=ct_last,
+                    system_events=system_events,
+                )
+                engine.caller_post_turn(
+                    incident_id=incident_id,
+                    text=interjection_text,
+                    metadata=interjection_meta,
+                )
             engine.calltaker_post_turn(incident_id=incident_id, text=ct_text, cad_updates=cad_updates)
 
             recorded_steps.append(
