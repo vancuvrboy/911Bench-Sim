@@ -79,7 +79,7 @@ class TestStressTranscriptAndMedia(unittest.TestCase):
         agent._pending_checkpoints = []
 
         specs = agent._tool_specs()
-        names = {str((s.get("function") or {}).get("name", "")) for s in specs}
+        names = {str(s.get("name", "")) for s in specs}
         self.assertIn("calltaker_receive_media", names)
 
         out = agent._exec_tool(

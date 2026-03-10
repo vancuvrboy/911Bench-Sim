@@ -1105,137 +1105,107 @@ class OpenAISyntheticCallTakerAgent:
                 return {"text": text, "cad_updates": {}, "end_call": False}
 
     def _tool_specs(self) -> list[dict[str, Any]]:
+        def _fn(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            }
+
         tools: list[dict[str, Any]] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_sop",
-                    "description": "Read SOP snippets by incident_type and step.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "incident_type": {"type": "string"},
-                            "step": {"type": "string"},
-                        },
-                        "required": [],
-                        "additionalProperties": False,
+            _fn(
+                "read_sop",
+                "Read SOP snippets by incident_type and step.",
+                {
+                    "type": "object",
+                    "properties": {"incident_type": {"type": "string"}, "step": {"type": "string"}},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            ),
+            _fn(
+                "read_cad_state",
+                "Read the current CAD state snapshot.",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+            _fn(
+                "read_qa_template",
+                "Read QA template sections/items.",
+                {
+                    "type": "object",
+                    "properties": {"section": {"type": "string"}},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            ),
+            _fn(
+                "calltaker_receive_media",
+                "Retrieve NG911 media artifact details by media_id.",
+                {
+                    "type": "object",
+                    "properties": {"incident_id": {"type": "string"}, "media_id": {"type": "string"}},
+                    "required": ["media_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            _fn(
+                "write_cad",
+                "Queue CAD field updates to apply this turn.",
+                {
+                    "type": "object",
+                    "properties": {"updates": {"type": "object"}},
+                    "required": ["updates"],
+                    "additionalProperties": False,
+                },
+            ),
+            _fn(
+                "end_call",
+                "Flag call termination.",
+                {
+                    "type": "object",
+                    "properties": {"reason": {"type": "string"}, "reason_detail": {"type": "string"}},
+                    "required": ["reason"],
+                    "additionalProperties": False,
+                },
+            ),
+            _fn(
+                "list_checkpoints",
+                "List pending checkpoint requests for the call-taker role.",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+            _fn(
+                "submit_checkpoint",
+                "Queue a checkpoint decision for submission.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {"type": "string"},
+                        "edited_payload": {"type": "object"},
+                        "rationale": {"type": "string"},
+                        "re_escalate_to": {"type": "string"},
                     },
+                    "required": ["request_id", "decision"],
+                    "additionalProperties": False,
                 },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_cad_state",
-                    "description": "Read the current CAD state snapshot.",
-                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_qa_template",
-                    "description": "Read QA template sections/items.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"section": {"type": "string"}},
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "calltaker_receive_media",
-                    "description": "Retrieve NG911 media artifact details by media_id.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "incident_id": {"type": "string"},
-                            "media_id": {"type": "string"},
-                        },
-                        "required": ["media_id"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_cad",
-                    "description": "Queue CAD field updates to apply this turn.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"updates": {"type": "object"}},
-                        "required": ["updates"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "end_call",
-                    "description": "Flag call termination.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "reason": {"type": "string"},
-                            "reason_detail": {"type": "string"},
-                        },
-                        "required": ["reason"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "list_checkpoints",
-                    "description": "List pending checkpoint requests for the call-taker role.",
-                    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "submit_checkpoint",
-                    "description": "Queue a checkpoint decision for submission.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "request_id": {"type": "string"},
-                            "decision": {"type": "string"},
-                            "edited_payload": {"type": "object"},
-                            "rationale": {"type": "string"},
-                            "re_escalate_to": {"type": "string"},
-                        },
-                        "required": ["request_id", "decision"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
+            ),
         ]
         if self.enable_map_tool:
             tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "view_map",
-                        "description": "Inspect approximate map/location context for the incident.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                            },
-                            "required": [],
-                            "additionalProperties": False,
-                        },
+                _fn(
+                    "view_map",
+                    "Inspect approximate map/location context for the incident.",
+                    {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": [],
+                        "additionalProperties": False,
                     },
-                }
+                )
             )
         if not self.enable_media_tool:
-            tools = [t for t in tools if str((t.get("function") or {}).get("name", "")) != "calltaker_receive_media"]
+            tools = [t for t in tools if str(t.get("name", "")) != "calltaker_receive_media"]
         return tools
 
     def _extract_tool_calls(self, resp: Any) -> list[dict[str, Any]]:
