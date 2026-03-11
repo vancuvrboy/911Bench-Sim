@@ -370,6 +370,33 @@ function renderAgentSelect(selectId, role, selectedId) {
   });
 }
 
+function renderFixtureSelect(selectId, rows, selectedPath = "") {
+  const select = $(selectId);
+  if (!select || !Array.isArray(rows) || rows.length === 0) return;
+  select.innerHTML = "";
+  rows.forEach((row) => {
+    const opt = document.createElement("option");
+    opt.value = String(row.path || "");
+    opt.textContent = String(row.label || row.path || "");
+    if (opt.value === selectedPath) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
+async function loadFixtureCatalog() {
+  try {
+    const out = await api.get("/api/fixtures/catalog");
+    renderFixtureSelect("callerFixture", out.caller_fixtures || [], "fixtures/caller_cooperative_calm.json");
+    renderFixtureSelect("incidentFixture", out.incident_fixtures || [], "fixtures/incident_fire_residential.json");
+    const preferredQa = (out.qa_fixtures || []).some((r) => r.path === "fixtures/qaTemplate_003.json")
+      ? "fixtures/qaTemplate_003.json"
+      : String(out.qa_fixtures?.[0]?.path || "");
+    renderFixtureSelect("qaFixture", out.qa_fixtures || [], preferredQa);
+  } catch (err) {
+    $("setupStatus").textContent = `Fixture catalog load failed: ${err.message}`;
+  }
+}
+
 async function loadAgentCatalog() {
   try {
     const out = await api.get("/api/agent/catalog");
@@ -512,7 +539,7 @@ function bind() {
 }
 
 bind();
-loadAgentCatalog().then(async () => {
+loadFixtureCatalog().then(() => loadAgentCatalog()).then(async () => {
   await refresh();
   openLiveStream();
 });

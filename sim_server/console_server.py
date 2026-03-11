@@ -111,6 +111,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json({"status": "ok"})
             return
+        if path == "/api/fixtures/catalog":
+            self._send_json(self._fixture_catalog())
+            return
         if path == "/api/agent/catalog":
             self._send_json({"profiles": list_profiles(config_root=self.app.agent_config_root)})
             return
@@ -136,6 +139,24 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._log_sop_retrieval(incident_type, step)
             return
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+
+    def _fixture_catalog(self) -> dict[str, Any]:
+        fixtures_root = self.app.root / "fixtures"
+
+        def _rows(glob_pat: str, strip_prefix: str = "") -> list[dict[str, str]]:
+            out: list[dict[str, str]] = []
+            for p in sorted(fixtures_root.glob(glob_pat)):
+                name = p.stem
+                if strip_prefix and name.startswith(strip_prefix):
+                    name = name[len(strip_prefix) :]
+                out.append({"path": f"fixtures/{p.name}", "label": name})
+            return out
+
+        return {
+            "caller_fixtures": _rows("caller_*.json", "caller_"),
+            "incident_fixtures": _rows("incident_*.json", "incident_"),
+            "qa_fixtures": _rows("qaTemplate_*.json"),
+        }
 
     def _state_signature(self, data: dict[str, Any]) -> tuple[Any, ...]:
         metrics = data.get("metrics", {}) if isinstance(data.get("metrics"), dict) else {}
@@ -472,6 +493,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     if not self.app.calltaker_agent:
                         raise SimError("agent_mode_invalid", "calltaker profile is not callable")
                     input_caller_text = self._pending_or_latest_caller_text(incident_id)
+                    system_events_for_calltaker = list(system_events)
+                    if self._should_issue_dispatch_nudge(
+                        incident_id=incident_id,
+                        events=events,
+                        cad_state=snap.get("cad_state", {}) if isinstance(snap.get("cad_state"), dict) else {},
+                    ):
+                        nudge = self._emit_dispatch_nudge(incident_id=incident_id, events=events)
+                        system_events_for_calltaker.append(nudge)
                     pending_checkpoints = self.app.engine.checkpoint_list(
                         incident_id=incident_id,
                         status_filter="pending",
@@ -480,7 +509,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     decision = self.app.calltaker_agent.next_turn(
                         caller_text=input_caller_text,
                         cad_state=snap.get("cad_state", {}),
-                        system_events=system_events,
+                        system_events=system_events_for_calltaker,
                         pending_checkpoints=pending_checkpoints,
                     )
                     calltaker_text = decision.text
@@ -542,7 +571,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     if not self.app.caller_agent:
                         raise SimError("agent_mode_invalid", "caller profile is not callable")
                     ct_input = calltaker_text if calltaker_text else self._latest_calltaker_text(incident_id)
-                    caller_text, caller_meta = self.app.caller_agent.next_turn(call_taker_text=ct_input, system_events=system_events)
+                    caller_visible_system_events = [ev for ev in system_events if ev.get("subtype") != "dispatch_nudge"]
+                    caller_text, caller_meta = self.app.caller_agent.next_turn(
+                        call_taker_text=ct_input,
+                        system_events=caller_visible_system_events,
+                    )
 
             if not caller_manual:
                 self.app.engine.caller_post_turn(incident_id=incident_id, text=caller_text, metadata=caller_meta)
@@ -583,6 +616,46 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "last_queued_caller_text": last_queued_caller_text,
             "phase": self.app.engine.plant_get_state_snapshot(incident_id).get("episode_phase"),
         }
+
+    def _current_turn(self, events: list[dict[str, Any]]) -> int:
+        return max([0] + [int(ev.get("turn", 0) or 0) for ev in events if ev.get("event_type") == "conversation"])
+
+    def _should_issue_dispatch_nudge(
+        self,
+        *,
+        incident_id: str,
+        events: list[dict[str, Any]],
+        cad_state: dict[str, Any],
+    ) -> bool:
+        turn = self._current_turn(events)
+        if turn <= 10:
+            return False
+        if bool(cad_state.get("dispatch_triggered", False)):
+            return False
+        location_ok = bool(str(cad_state.get("location", "")).strip())
+        incident_type_ok = bool(str(cad_state.get("incident_type", "")).strip())
+        if not (location_ok and incident_type_ok):
+            return False
+        # Avoid duplicate nudge spam within the same turn.
+        for ev in reversed(events[-20:]):
+            if ev.get("event_type") != "system":
+                continue
+            if ev.get("subtype") == "dispatch_nudge" and int(ev.get("turn", 0) or 0) == turn:
+                return False
+        return True
+
+    def _emit_dispatch_nudge(self, *, incident_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+        turn = self._current_turn(events)
+        nudge = {
+            "event_type": "system",
+            "incident_id": incident_id,
+            "turn": int(turn),
+            "subtype": "dispatch_nudge",
+            "text": "You have all the necessary information to dispatch.",
+            "detail": {"target": "call_taker"},
+        }
+        self.app.engine.plant_emit_event(nudge)
+        return nudge
 
     def _end_call_allowed(self, incident_id: str, reason: str, pending_cad_updates: dict[str, Any] | None = None) -> bool:
         snap = self.app.engine.plant_get_state_snapshot(incident_id)

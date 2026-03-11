@@ -25,6 +25,11 @@ def build_qa_input(*, events: list[dict[str, Any]], qa_template: dict[str, Any],
     template_out = dict(qa_template)
     template_out["normalize"] = normalize
     template_out["normalize_to"] = normalize_to
+    templates = qa_template.get("templates")
+    if isinstance(templates, dict):
+        incident_key = str(incident_type or "").upper()
+        selected_keys = _selected_template_keys(templates=templates, incident_key=incident_key)
+        template_out["templates"] = {k: templates[k] for k in selected_keys if isinstance(templates.get(k), dict)}
 
     return {
         "ruleset_id": str(qa_template.get("ruleset_id", "NENA-ANS1.107.1-2015-Add2.v1")),
@@ -215,18 +220,26 @@ def _resolve_normalization(qa_template: dict[str, Any]) -> tuple[bool, float]:
     return normalize, max(0.0, normalize_to)
 
 
+def _selected_template_keys(*, templates: dict[str, Any], incident_key: str) -> list[str]:
+    # COMMON is fallback-only. For known disciplines, use discipline section only.
+    key = str(incident_key or "").upper()
+    if key and isinstance(templates.get(key), dict):
+        return [key]
+    if isinstance(templates.get("COMMON"), dict):
+        return ["COMMON"]
+    return []
+
+
 def _section_order(qa_template: dict[str, Any], qa_score: dict[str, Any]) -> list[str]:
     incident_type = str(qa_score.get("incident_type", "")).upper()
     order: list[str] = []
     templates = qa_template.get("templates", {})
     if isinstance(templates, dict):
-        common = templates.get("COMMON", {})
-        if isinstance(common, dict):
-            for sec in common.get("sections", []):
-                if isinstance(sec, dict) and sec.get("name"):
-                    order.append(str(sec["name"]))
-        if incident_type and isinstance(templates.get(incident_type), dict):
-            for sec in templates[incident_type].get("sections", []):
+        for key in _selected_template_keys(templates=templates, incident_key=incident_type):
+            block = templates.get(key)
+            if not isinstance(block, dict):
+                continue
+            for sec in block.get("sections", []):
                 if isinstance(sec, dict) and sec.get("name"):
                     order.append(str(sec["name"]))
     if not order:
@@ -261,7 +274,7 @@ def _template_item_index(qa_template: dict[str, Any], incident_type: str) -> dic
     templates = qa_template.get("templates", {})
     if not isinstance(templates, dict):
         return out
-    for key in ("COMMON", incident_type):
+    for key in _selected_template_keys(templates=templates, incident_key=str(incident_type).upper()):
         section_group = templates.get(key)
         if not isinstance(section_group, dict):
             continue

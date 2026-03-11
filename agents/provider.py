@@ -1130,9 +1130,15 @@ class OpenAIQAEvaluatorAgent:
 
     def _build_packet(self, *, events: list[dict[str, Any]], incident_type: str) -> dict[str, Any]:
         transcript = self._conversation_rows(events)
+        incident_key = str(incident_type or "").upper()
+        template_out = dict(self.qa_template_json)
+        templates = self.qa_template_json.get("templates")
+        if isinstance(templates, dict):
+            selected_keys = self._selected_template_keys(incident_key=incident_key)
+            template_out["templates"] = {k: templates[k] for k in selected_keys if isinstance(templates.get(k), dict)}
         return {
             "incident_type": incident_type,
-            "template": self.qa_template_json,
+            "template": template_out,
             "transcript": transcript,
             "required_output_fields": [
                 "evaluator_agent_id",
@@ -1229,7 +1235,7 @@ class OpenAIQAEvaluatorAgent:
         qa_template_id = str(self.qa_template_json.get("version", obj.get("qa_template_id", "unknown")))
         sections = obj.get("sections_applied")
         if not isinstance(sections, list):
-            sections = ["COMMON", str(incident_type).upper()]
+            sections = self._selected_template_keys(incident_key=str(incident_type).upper())
         return {
             "evaluator_agent_id": str(obj.get("evaluator_agent_id", "qa-agent")),
             "qa_template_id": qa_template_id,
@@ -1307,7 +1313,7 @@ class OpenAIQAEvaluatorAgent:
         templates = self.qa_template_json.get("templates", {})
         if not isinstance(templates, dict):
             return out
-        for key in ("COMMON", incident_type):
+        for key in self._selected_template_keys(incident_key=str(incident_type).upper()):
             block = templates.get(key)
             if not isinstance(block, dict):
                 continue
@@ -1321,6 +1327,17 @@ class OpenAIQAEvaluatorAgent:
                             "question": str(item.get("question", "")),
                         }
         return out
+
+    def _selected_template_keys(self, *, incident_key: str) -> list[str]:
+        templates = self.qa_template_json.get("templates", {})
+        if not isinstance(templates, dict):
+            return []
+        key = str(incident_key or "").upper()
+        if key and isinstance(templates.get(key), dict):
+            return [key]
+        if isinstance(templates.get("COMMON"), dict):
+            return ["COMMON"]
+        return []
 
     def _extract_text(self, resp: Any) -> str:
         output_text = str(getattr(resp, "output_text", "") or "").strip()
